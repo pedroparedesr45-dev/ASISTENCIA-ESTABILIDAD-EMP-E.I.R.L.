@@ -1117,6 +1117,45 @@ if VISTA_TRABAJADOR_MOVIL:
 # TEMA VISUAL GLOBAL — "futurista" (Parte 1 del rediseño)
 # ---------------------------------------------------------
 # Solo CSS/HTML: no cambia ningún widget, dato ni lógica de negocio.
+def _generar_css_estrellas(cantidad, semilla):
+    """Genera un campo de estrellas fijo (no se regenera en cada rerun,
+    misma semilla siempre) usando la técnica de box-shadow — una sola
+    capa con cientos de 'estrellas' sin crear cientos de elementos HTML
+    reales, así no pesa nada. Cubre TODA la pantalla (incluida la franja
+    de arriba, que a veces se ve vacía por el espacio reservado de
+    Streamlit) para que combine con el tema de los meteoritos en vez de
+    verse como un hueco."""
+    rnd = random.Random(semilla)
+    sombras = []
+    for _ in range(cantidad):
+        x = rnd.randint(0, 100)
+        y = rnd.randint(0, 100)
+        sombras.append(f"{x}vw {y}vh #fff")
+    return ", ".join(sombras)
+
+
+_ESTRELLAS_CSS = f"""
+.fac-estrellas{{
+    position:absolute; inset:0; width:2px; height:2px; border-radius:50%;
+    background:transparent;
+}}
+.fac-estrellas-1{{
+    box-shadow:{_generar_css_estrellas(90, 101)};
+    animation:fac-titilar-1 4s ease-in-out infinite alternate;
+    opacity:0.55;
+}}
+.fac-estrellas-2{{
+    box-shadow:{_generar_css_estrellas(60, 202)};
+    animation:fac-titilar-2 5.5s ease-in-out infinite alternate;
+    opacity:0.35;
+}}
+@keyframes fac-titilar-1{{ from{{opacity:0.25;}} to{{opacity:0.75;}} }}
+@keyframes fac-titilar-2{{ from{{opacity:0.6;}} to{{opacity:0.15;}} }}
+@media (prefers-reduced-motion: reduce){{
+    .fac-estrellas-1, .fac-estrellas-2{{ animation:none !important; }}
+}}
+"""
+
 # Reutiliza los mismos st.button/st.text_input/st.selectbox/etc. de
 # siempre, solo les cambia la piel. El fondo animado va en una capa fija
 # detrás de todo (z-index -1) para no interferir con los clics.
@@ -1279,17 +1318,21 @@ render_html(
         border-radius:14px;
         padding:10px 14px;
     }
+
+    /*__ESTRELLAS_CSS__*/
     </style>
 
     <div class="fac-bg-layer">
         <div class="fac-bg-base"></div>
+        <div class="fac-estrellas fac-estrellas-1"></div>
+        <div class="fac-estrellas fac-estrellas-2"></div>
         <div class="fac-orb fac-orb-cyan"></div>
         <div class="fac-orb fac-orb-violet"></div>
         <div class="fac-orb fac-orb-cyan2"></div>
         <div class="fac-grid-overlay"></div>
         <div class="fac-scanline"></div>
     </div>
-    """
+    """.replace("/*__ESTRELLAS_CSS__*/", _ESTRELLAS_CSS)
 )
 
 
