@@ -2114,8 +2114,6 @@ def cargar_configuracion_sistema(_supabase, empresa_id):
             st.session_state.regimen_laboral = (
                 cfg.get("regimen_laboral") or "GENERAL"
             )
-            if cfg.get("logo_globos_url"):
-                st.session_state.logo_globos_url = cfg["logo_globos_url"]
             st.session_state.planilla_habilitada = bool(
                 cfg.get("planilla_habilitada", False)
             )
@@ -4404,27 +4402,41 @@ if not VISTA_TRABAJADOR_MOVIL:
                 if clave_coincide(_pin_candado_dev, st.session_state.pin_developer):
                     st.session_state.dev_entorno_desbloqueado = True
                     st.session_state.developer_global = True
-                    # El candado te mete directo al panel de DEV_TEST —
-                    # ya probaste quién eres con el PIN Developer, no
-                    # hace falta un segundo PIN aparte para esa empresa.
-                    df_dev_candado = cargar_empresas()
-                    df_dev_candado = df_dev_candado[
-                        df_dev_candado["entorno"] == "DEV"
-                    ]
-                    if not df_dev_candado.empty:
-                        st.session_state.empresa_id = str(
-                            df_dev_candado.iloc[0]["empresa_id"]
-                        )
-                        cargar_configuracion_sistema(
-                            supabase, st.session_state.empresa_id
-                        )
-                        st.session_state.autenticado = True
-                        st.session_state.rol = "master"
-                    # Si todavía no existe ninguna empresa DEV_TEST, se
-                    # deja 'autenticado' en False — el mensaje de
-                    # bootstrap (más abajo, en Panel de Gestión) se
-                    # encarga de dejarlo crear la primera.
-                    st.rerun()
+                    if st.session_state.autenticado:
+                        # CORREGIDO: si ya estabas trabajando en una
+                        # empresa (por ejemplo, entraste a Producción
+                        # como SuperAdmin), el candado solo debe
+                        # desbloquear las HERRAMIENTAS de developer
+                        # (logo, diagnóstico) — sin cambiarte la
+                        # empresa activa a DEV_TEST por detrás. Antes
+                        # esto pasaba siempre, y hacía que cosas como
+                        # subir el logo se guardaran en DEV_TEST en vez
+                        # de en la empresa en la que realmente estabas
+                        # parado.
+                        st.rerun()
+                    else:
+                        # Todavía no habías iniciado sesión en ninguna
+                        # empresa — aquí sí tiene sentido meterte
+                        # directo al panel de DEV_TEST, ya que probaste
+                        # quién eres con el PIN Developer.
+                        df_dev_candado = cargar_empresas()
+                        df_dev_candado = df_dev_candado[
+                            df_dev_candado["entorno"] == "DEV"
+                        ]
+                        if not df_dev_candado.empty:
+                            st.session_state.empresa_id = str(
+                                df_dev_candado.iloc[0]["empresa_id"]
+                            )
+                            cargar_configuracion_sistema(
+                                supabase, st.session_state.empresa_id
+                            )
+                            st.session_state.autenticado = True
+                            st.session_state.rol = "master"
+                        # Si todavía no existe ninguna empresa DEV_TEST,
+                        # se deja 'autenticado' en False — el mensaje
+                        # de bootstrap (en Panel de Gestión) se encarga
+                        # de dejarlo crear la primera.
+                        st.rerun()
                 else:
                     st.error("PIN Incorrecto.")
     else:
@@ -4444,61 +4456,18 @@ if not VISTA_TRABAJADOR_MOVIL:
         # aplique a TODOS los dispositivos y sesiones, no solo a la que
         # lo configura (antes solo vivía en esta sesión del navegador).
         with st.sidebar.expander("🏅 Animación de éxito (solo dev)"):
-            _valor_logo_actual = st.session_state.get(
-                "logo_globos_url", LOGO_DEFAULT_EMBEBIDO
+            st.caption(
+                "El logo se maneja 100% desde el código (embebido en"
+                " app.py) — ya no hay subida de archivo ni link ni"
+                " nada guardado en Supabase, a pedido tuyo. Cada"
+                " repositorio tiene su propio logo fijo en el código."
             )
-            if _valor_logo_actual == LOGO_DEFAULT_EMBEBIDO:
-                st.caption("✅ Usando el logo por defecto embebido en el código.")
-            else:
-                st.caption(
-                    "⚠️ Hay un logo GUARDADO EN SUPABASE distinto al"
-                    " embebido en el código — ese es el que se está"
-                    " usando (tiene prioridad). Si quieres volver al"
-                    " logo por defecto de esta empresa, usa el botón de"
-                    " abajo."
-                )
-            if st.button("🔄 Restablecer al logo por defecto de esta empresa"):
-                st.session_state.logo_globos_url = LOGO_DEFAULT_EMBEBIDO
-                if supabase:
-                    try:
-                        guardar_configuracion_sistema(
-                            supabase,
-                            st.session_state.empresa_id,
-                            logo_globos_url="",
-                        )
-                        st.success(
-                            "✅ Restablecido — ya no depende de nada"
-                            " guardado en Supabase."
-                        )
-                        st.rerun()
-                    except Exception as e:
-                        st.warning(f"No se pudo guardar en la nube ({e}).")
-
-            _logo_nuevo = st.text_input(
-                "O pega la URL de un logo distinto para esta empresa:",
-                value="",
-                placeholder="https://...",
-                help=(
-                    "Se usa en el sello que aparece al confirmar una"
-                    " marcación, en el anillo de verificación al iniciar"
-                    " sesión, y en los meteoritos de fondo. Se guarda en"
-                    " Supabase para TODOS los dispositivos, no solo"
-                    " este — y toma prioridad sobre el logo por defecto"
-                    " del código hasta que lo restablezcas."
-                ),
+            st.image(LOGO_DEFAULT_EMBEBIDO, width=120, caption="Logo actual de este repositorio")
+            st.caption(
+                "Para cambiarlo, mándame la imagen directo al chat"
+                " (no un link) y te la embebo en el código — línea"
+                " ~983 de app.py (LOGO_DEFAULT_EMBEBIDO)."
             )
-            if _logo_nuevo:
-                st.session_state.logo_globos_url = _logo_nuevo
-                if supabase:
-                    try:
-                        guardar_configuracion_sistema(
-                            supabase,
-                            st.session_state.empresa_id,
-                            logo_globos_url=_logo_nuevo,
-                        )
-                        st.success("✅ Logo actualizado para todos.")
-                    except Exception as e:
-                        st.warning(f"No se pudo guardar en la nube ({e}).")
 
         # Indicador de estado del Nivel 1 (detección de rostro). Solo
         # visible aquí, con el entorno DEV desbloqueado, para que el
@@ -6201,15 +6170,18 @@ else:
         st.session_state.entorno = "PROD"
         st.rerun()
 
-if opcion == "⏰ Marcar Asistencia":
-    _logo_meteoros = st.session_state.get(
-        "logo_globos_url", LOGO_DEFAULT_EMBEBIDO
-    )
+def render_lluvia_meteoritos(cantidad=4):
+    """Dibuja la 'lluvia' de meteoritos (el logo de la empresa cruzando
+    la pantalla en diagonal con una estela) — se usa en la pantalla de
+    Marcar Asistencia y también en el Panel de Gestión para
+    SuperAdmin/Admin/Developer, para que se sienta el mismo tema
+    futurista en toda la app, no solo al marcar."""
+    _logo_meteoros = LOGO_DEFAULT_EMBEBIDO
     _html_meteoros = (
         '<div style="position:fixed; inset:0; z-index:-1; overflow:hidden;'
         ' pointer-events:none;">'
     )
-    for _m in range(4):
+    for _m in range(cantidad):
         _top_ini = random.randint(-10, 35)
         _left_ini = random.randint(55, 125)
         _delay_m = round(random.uniform(0, 7), 2)
@@ -6244,6 +6216,10 @@ if opcion == "⏰ Marcar Asistencia":
     </style>
     """
     render_html(_html_meteoros)
+
+
+if opcion == "⏰ Marcar Asistencia":
+    render_lluvia_meteoritos()
 
     render_html(
         f"""
@@ -6400,9 +6376,7 @@ if opcion == "⏰ Marcar Asistencia":
                         if login_ok:
                             st.session_state.emp_login_ok = True
                             st.session_state.emp_datos = emp_match.iloc[0]
-                            _logo_verif = st.session_state.get(
-                                "logo_globos_url", LOGO_DEFAULT_EMBEBIDO
-                            )
+                            _logo_verif = LOGO_DEFAULT_EMBEBIDO
                             render_animacion_verificando(_logo_verif)
                             _dormir(1.5)
                             st.rerun()
@@ -6806,9 +6780,7 @@ if opcion == "⏰ Marcar Asistencia":
                 # protagonista, adaptada al estado real
                 # (Puntual/Tardanza) y a la racha real de puntualidad
                 # del trabajador ---
-                _logo_globos = st.session_state.get(
-                    "logo_globos_url", LOGO_DEFAULT_EMBEBIDO
-                )
+                _logo_globos = LOGO_DEFAULT_EMBEBIDO
                 _racha_actual = 0
                 if tipo_marcacion == "Entrada" and estado == "Puntual":
                     _racha_actual = 1 + calcular_racha_puntualidad(
@@ -6953,6 +6925,7 @@ elif opcion == "🔐 Panel de Gestión / Admin":
                     # candado de la barra lateral.
                     st.error("PIN Incorrecto.")
     else:
+        render_lluvia_meteoritos(cantidad=3)
         from streamlit_autorefresh import st_autorefresh
 
         # --- Auto-refresh inteligente ---
