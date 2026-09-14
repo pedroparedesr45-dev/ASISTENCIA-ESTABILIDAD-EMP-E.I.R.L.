@@ -1178,6 +1178,13 @@ render_html(
     [data-testid="stAppViewContainer"], [data-testid="stHeader"]{ background:transparent !important; }
     .stApp{ background:transparent !important; }
     body, [data-testid="stAppViewContainer"] { color:var(--text); }
+    /* Reduce el espacio vacío reservado arriba de la pantalla (la
+       barra superior de Streamlit, transparente pero seguía ocupando
+       lugar) — así el contenido empieza más arriba, sin ese hueco. */
+    [data-testid="stHeader"]{ height:2.5rem !important; }
+    [data-testid="stAppViewContainer"] > .main .block-container{
+        padding-top:1.5rem !important;
+    }
 
     h1, h2, h3{ font-family:var(--font-display) !important; letter-spacing:0.01em; }
     h1{
@@ -6164,7 +6171,7 @@ if opcion == "⏰ Marcar Asistencia":
         _left_ini = random.randint(55, 125)
         _delay_m = round(random.uniform(0, 7), 2)
         _dur_m = round(random.uniform(5, 8), 2)
-        _tam = random.randint(60, 100)
+        _tam = random.randint(100, 150)
         _html_meteoros += f"""
         <div style="position:absolute; top:{_top_ini}%; left:{_left_ini}%;
             width:{_tam}px; height:{_tam}px;
