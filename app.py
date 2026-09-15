@@ -1076,39 +1076,12 @@ def render_gate_consentimiento(supabase, datos_emp):
                 fecha_consentimiento = ahora_peru().strftime(
                     "%Y-%m-%d %H:%M:%S"
                 )
-                # OJO: antes solo se mandaban empresa_id/dni/consentimiento.
-                # Si el trabajador todavía no existía como fila en la
-                # Supabase de este repositorio (solo estaba en el CSV
-                # local), el upsert creaba una fila nueva sin "nombre" —
-                # y esa columna no admite nulos, así que Supabase
-                # rechazaba el guardado. Se incluyen aquí los datos base
-                # que ya se conocen localmente para que, si hay que crear
-                # la fila, quede completa en vez de a medias.
-                datos_consentimiento = {}
-                for _campo_base in (
-                    "nombre",
-                    "cargo",
-                    "sede_principal",
-                    "fecha_ingreso",
-                ):
-                    _valor_base = (
-                        datos_emp.get(_campo_base)
-                        if hasattr(datos_emp, "get")
-                        else None
-                    )
-                    try:
-                        _valor_es_nulo = pd.isna(_valor_base)
-                    except (TypeError, ValueError):
-                        _valor_es_nulo = _valor_base is None
-                    if not _valor_es_nulo and _valor_base not in (None, ""):
-                        datos_consentimiento[_campo_base] = _valor_base
-
-                datos_consentimiento.update({
+                datos_consentimiento = {
                     "empresa_id": st.session_state.empresa_id,
                     "dni": str(datos_emp["dni"]),
                     "consentimiento_aceptado": True,
                     "consentimiento_fecha": fecha_consentimiento,
-                })
+                }
                 if supabase:
                     try:
                         guardar_empleado_supabase(
