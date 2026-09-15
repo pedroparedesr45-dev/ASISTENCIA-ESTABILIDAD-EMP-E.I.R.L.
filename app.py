@@ -2554,12 +2554,62 @@ def guardar_empleado_supabase(supabase, datos_empleado):
     veces" para que apareciera). Limpiando el caché aquí, en el mismo
     lugar donde se guarda, la próxima lectura siempre trae el dato
     fresco de inmediato — sin tener que acordarse de limpiarlo a mano
-    en cada uno de los botones de "Agregar/Editar" que hay en la app."""
+    en cada uno de los botones de "Agregar/Editar" que hay en la app.
+
+    BUG REAL YA CORREGIDO (2): varios puntos del código llaman a esta
+    función con un dict PARCIAL (por ejemplo, al guardar solo el
+    consentimiento o solo el horario personalizado de un trabajador,
+    sin su nombre). Si ese trabajador ya existía como fila en
+    Supabase, un upsert parcial es normal y no pasa nada. Pero si
+    TODAVÍA no existía ahí (por ejemplo, solo estaba en el CSV local),
+    el upsert crea una fila nueva — y como "nombre" es NOT NULL en la
+    tabla, Supabase rechazaba el guardado completo con un error poco
+    claro. Para no tener que acordarse de mandar "nombre" en cada uno
+    de los ~8 lugares del código que guardan datos parciales de un
+    trabajador, se resuelve UNA sola vez aquí: si falta "nombre" y la
+    fila es nueva, se rescata del CSV local antes de guardar."""
     if not supabase:
         raise RuntimeError("El cliente de Supabase no está configurado.")
     datos = dict(datos_empleado)
     datos["empresa_id"] = str(datos["empresa_id"])
     datos["dni"] = str(datos["dni"])
+
+    if not datos.get("nombre"):
+        try:
+            _existe_resp = (
+                supabase.table("empleados")
+                .select("dni")
+                .eq("empresa_id", datos["empresa_id"])
+                .eq("dni", datos["dni"])
+                .limit(1)
+                .execute()
+            )
+            _fila_ya_existe = bool(_existe_resp.data)
+        except Exception:
+            # Si la consulta de verificación falla (ej. sin conexión
+            # momentánea), no se arriesga nada nuevo: se deja pasar el
+            # upsert tal cual como se comportaba antes de este fix.
+            _fila_ya_existe = True
+
+        if not _fila_ya_existe:
+            _nombre_rescatado = None
+            if os.path.exists(CSV_EMPLEADOS):
+                try:
+                    _df_csv_tmp = pd.read_csv(CSV_EMPLEADOS, dtype=str)
+                    _match_csv = _df_csv_tmp[
+                        (_df_csv_tmp["empresa_id"] == datos["empresa_id"])
+                        & (_df_csv_tmp["dni"] == datos["dni"])
+                    ]
+                    if len(_match_csv) > 0 and pd.notna(
+                        _match_csv.iloc[0].get("nombre")
+                    ):
+                        _nombre_rescatado = str(
+                            _match_csv.iloc[0]["nombre"]
+                        ).strip()
+                except Exception:
+                    pass
+            datos["nombre"] = _nombre_rescatado or f"(DNI {datos['dni']})"
+
     supabase.table("empleados").upsert(
         datos, on_conflict="empresa_id,dni"
     ).execute()
@@ -9038,17 +9088,46 @@ elif opcion == "🔐 Panel de Gestión / Admin":
 
                             if supabase:
                                 try:
+                                    # OJO: mismo bug que en el consentimiento
+                                    # — si este trabajador todavía no existía
+                                    # como fila en Supabase (solo local), el
+                                    # upsert creaba una fila nueva sin
+                                    # "nombre" y Supabase la rechazaba. Se
+                                    # incluyen los datos base ya conocidos
+                                    # localmente para que, si hay que crear
+                                    # la fila, quede completa.
+                                    _datos_horario = {}
+                                    for _campo_base in (
+                                        "nombre",
+                                        "cargo",
+                                        "sede_principal",
+                                        "fecha_ingreso",
+                                    ):
+                                        _valor_base = emp_h_row.get(
+                                            _campo_base
+                                        )
+                                        try:
+                                            _es_nulo = pd.isna(_valor_base)
+                                        except (TypeError, ValueError):
+                                            _es_nulo = _valor_base is None
+                                        if (
+                                            not _es_nulo
+                                            and _valor_base not in (None, "")
+                                        ):
+                                            _datos_horario[_campo_base] = (
+                                                _valor_base
+                                            )
+                                    _datos_horario.update({
+                                        "empresa_id": (
+                                            st.session_state.empresa_id
+                                        ),
+                                        "dni": dni_h,
+                                        "horario_personalizado": (
+                                            horario_json
+                                        ),
+                                    })
                                     guardar_empleado_supabase(
-                                        supabase,
-                                        {
-                                            "empresa_id": (
-                                                st.session_state.empresa_id
-                                            ),
-                                            "dni": dni_h,
-                                            "horario_personalizado": (
-                                                horario_json
-                                            ),
-                                        },
+                                        supabase, _datos_horario
                                     )
                                 except Exception as e:
                                     st.warning(
