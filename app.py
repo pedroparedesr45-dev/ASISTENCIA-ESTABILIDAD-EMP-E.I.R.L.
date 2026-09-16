@@ -1852,6 +1852,9 @@ if "mejoras_activadas_prod" not in st.session_state:
 if "permitir_horas_extra" not in st.session_state:
     st.session_state.permitir_horas_extra = False
 
+if "minutos_break_almuerzo" not in st.session_state:
+    st.session_state.minutos_break_almuerzo = 60
+
 if "regimen_laboral" not in st.session_state:
     st.session_state.regimen_laboral = "GENERAL"
 
@@ -2452,6 +2455,9 @@ def cargar_configuracion_sistema(_supabase, empresa_id):
                 st.session_state.pin_master = cfg["pin_master"]
             st.session_state.permitir_horas_extra = bool(
                 cfg.get("permitir_horas_extra", False)
+            )
+            st.session_state.minutos_break_almuerzo = int(
+                cfg.get("minutos_break_almuerzo") or 60
             )
             st.session_state.regimen_laboral = (
                 cfg.get("regimen_laboral") or "GENERAL"
@@ -5035,12 +5041,14 @@ def obtener_horario_oficial(emp_row, df_sedes, fecha_obj):
     return h_ent, h_sal
 
 
-def calcular_horas_trabajadas_periodo(df_periodo):
+def calcular_horas_trabajadas_periodo(df_periodo, descuento_break_min=0):
     """Suma las horas realmente trabajadas (Entrada → Salida, por día)
     dentro del DataFrame de asistencia dado (ya filtrado por trabajador
     y por el rango de fechas que se quiera medir). Días con solo
     Entrada (sin Salida marcada aún) no se cuentan, para no inflar el
-    acumulado con un turno todavía abierto. Devuelve (horas, minutos).
+    acumulado con un turno todavía abierto. 'descuento_break_min' se
+    resta de cada día contado (ej. 60 min de almuerzo), sin dejar que
+    un día individual baje de 0. Devuelve (horas, minutos).
     """
     if df_periodo is None or df_periodo.empty:
         return 0, 0
@@ -5064,9 +5072,96 @@ def calcular_horas_trabajadas_periodo(df_periodo):
             if _delta_min < 0:
                 _delta_min += 24 * 60  # turno que cruza la medianoche
             if 0 < _delta_min < 20 * 60:  # descarta datos corruptos (>20h)
+                _delta_min = max(0.0, _delta_min - descuento_break_min)
                 total_min += _delta_min
         except Exception:
             continue
+
+    total_min = int(round(total_min))
+    return total_min // 60, total_min % 60
+
+
+def emp_tiene_break_almuerzo(emp_row):
+    """Resuelve si el trabajador tiene hora de break por almuerzo
+    (True por defecto, incluso para trabajadores antiguos que nunca
+    tuvieron este campo guardado)."""
+    _valor = (
+        emp_row.get("tiene_break_almuerzo", True)
+        if hasattr(emp_row, "get")
+        else True
+    )
+    try:
+        if pd.isna(_valor):
+            return True
+    except (TypeError, ValueError):
+        pass
+    if isinstance(_valor, str):
+        return _valor.strip().upper() not in ("FALSE", "NO", "0", "")
+    return bool(_valor)
+
+
+def calcular_horas_esperadas_periodo(
+    emp_info, df_sedes, fecha_inicio, fecha_fin, descuento_break_min=0
+):
+    """Calcula cuántas horas le TOCABA acumular al trabajador entre
+    'fecha_inicio' y 'fecha_fin' (ambas incluidas), día por día, según
+    SU horario realmente pactado — respeta horario_personalizado si lo
+    tiene (incluyendo qué días son laborables para él en particular),
+    o si no, el horario de su sede y los días laborables generales de
+    la empresa. Los feriados oficiales no suman horas esperadas. Se le
+    resta el break de almuerzo a cada día contado, igual que a las
+    horas reales, para comparar manzanas con manzanas. Nunca evalúa
+    fechas futuras (más allá de 'hoy'). Devuelve (horas, minutos).
+    """
+    if fecha_inicio > fecha_fin:
+        return 0, 0
+
+    _hoy_limite = hoy_peru()
+    _fecha_fin_real = min(fecha_fin, _hoy_limite)
+    if fecha_inicio > _fecha_fin_real:
+        return 0, 0
+
+    try:
+        _h_personal = json.loads(
+            emp_info.get("horario_personalizado", "{}") or "{}"
+        )
+    except Exception:
+        _h_personal = {}
+
+    total_min = 0.0
+    _f = fecha_inicio
+    while _f <= _fecha_fin_real:
+        _f_str = _f.strftime("%Y-%m-%d")
+        _nombre_dia = DIAS_SEMANA_MAP[_f.weekday()]
+
+        if _f_str in FERIADOS_OFICIALES:
+            _f += timedelta(days=1)
+            continue
+
+        if _nombre_dia in _h_personal:
+            _es_laborable = _h_personal[_nombre_dia].get("activo", True)
+        else:
+            _es_laborable = (
+                _nombre_dia in st.session_state.dias_laborables
+            )
+
+        if _es_laborable:
+            _h_ent_str, _h_sal_str = obtener_horario_oficial(
+                emp_info, df_sedes, _f
+            )
+            try:
+                _t_ent = datetime.strptime(str(_h_ent_str), "%H:%M:%S")
+                _t_sal = datetime.strptime(str(_h_sal_str), "%H:%M:%S")
+                _delta_min = (_t_sal - _t_ent).total_seconds() / 60
+                if _delta_min < 0:
+                    _delta_min += 24 * 60
+                if 0 < _delta_min < 20 * 60:
+                    _delta_min = max(0.0, _delta_min - descuento_break_min)
+                    total_min += _delta_min
+            except Exception:
+                pass
+
+        _f += timedelta(days=1)
 
     total_min = int(round(total_min))
     return total_min // 60, total_min % 60
@@ -8428,9 +8523,13 @@ elif opcion == "🔐 Panel de Gestión / Admin":
                     # semana (semana calendario real, lunes a hoy —
                     # independiente del mes que se esté viendo en el
                     # filtro) y del MES seleccionado en el filtro de
-                    # arriba. Son individuales por trabajador, ya que
-                    # se calculan sobre df_asist_emp (ya filtrado a
-                    # emp_ind_sel). ---
+                    # arriba, comparadas contra las horas que le TOCABA
+                    # acumular según SU horario pactado día por día
+                    # (respeta horario_personalizado, días laborables
+                    # distintos, y feriados). Son individuales por
+                    # trabajador. Si el trabajador tiene activado el
+                    # break de almuerzo, se le descuenta de ambos
+                    # lados (real y esperado) para comparar parejo.
                     _hoy_ref_semana = hoy_peru()
                     _inicio_semana_ref = _hoy_ref_semana - timedelta(
                         days=_hoy_ref_semana.weekday()
@@ -8445,17 +8544,72 @@ elif opcion == "🔐 Panel de Gestión / Admin":
                         (_fechas_emp_full >= _inicio_semana_ref.strftime("%Y-%m-%d"))
                         & (_fechas_emp_full <= _hoy_ref_semana.strftime("%Y-%m-%d"))
                     ]
+
+                    _break_activo_emp = emp_tiene_break_almuerzo(emp_info)
+                    _min_break_emp = (
+                        int(st.session_state.get("minutos_break_almuerzo", 60))
+                        if _break_activo_emp
+                        else 0
+                    )
+
                     _h_semana, _m_semana = calcular_horas_trabajadas_periodo(
-                        _df_semana_actual
+                        _df_semana_actual, _min_break_emp
                     )
                     _h_mes, _m_mes = calcular_horas_trabajadas_periodo(
-                        df_asist_emp
+                        df_asist_emp, _min_break_emp
+                    )
+
+                    _h_esp_sem, _m_esp_sem = calcular_horas_esperadas_periodo(
+                        emp_info,
+                        df_sedes,
+                        _inicio_semana_ref,
+                        _hoy_ref_semana,
+                        _min_break_emp,
+                    )
+                    _primer_dia_mes_esp = date(anio_ind_sel, m_num, 1)
+                    _ultimo_dia_mes_esp = date(
+                        anio_ind_sel, m_num, num_dias_m
+                    )
+                    _h_esp_mes, _m_esp_mes = calcular_horas_esperadas_periodo(
+                        emp_info,
+                        df_sedes,
+                        _primer_dia_mes_esp,
+                        _ultimo_dia_mes_esp,
+                        _min_break_emp,
+                    )
+
+                    def _pct_cumplido(h_real, m_real, h_esp, m_esp):
+                        _min_real = h_real * 60 + m_real
+                        _min_esp = h_esp * 60 + m_esp
+                        if _min_esp <= 0:
+                            return 100
+                        return max(0, min(100, round(_min_real / _min_esp * 100)))
+
+                    def _color_estado(pct):
+                        if pct >= 100:
+                            return "#00d68f"
+                        if pct >= 70:
+                            return "#ffc93c"
+                        return "#ff6b6b"
+
+                    _pct_sem = _pct_cumplido(
+                        _h_semana, _m_semana, _h_esp_sem, _m_esp_sem
+                    )
+                    _pct_mes = _pct_cumplido(
+                        _h_mes, _m_mes, _h_esp_mes, _m_esp_mes
+                    )
+                    _color_sem = _color_estado(_pct_sem)
+                    _color_mes = _color_estado(_pct_mes)
+                    _break_caption = (
+                        f"🍽️ break de {_min_break_emp} min descontado"
+                        if _break_activo_emp
+                        else "🍽️ sin break descontado"
                     )
 
                     render_html(f"""
                     <div style="display:flex; gap:10px; flex-wrap:wrap;
                         margin:10px 0 16px 0;">
-                        <div style="flex:1; min-width:190px;
+                        <div style="flex:1; min-width:220px;
                             background:linear-gradient(135deg,#1f6feb,#5865f2);
                             border-radius:14px; padding:14px 16px;
                             box-shadow:0 4px 14px rgba(88,101,242,0.35);">
@@ -8469,14 +8623,25 @@ elif opcion == "🔐 Panel de Gestión / Admin":
                                 {_h_semana}<span style="font-size:15px;
                                 font-weight:600;">h</span> {_m_semana:02d}<span
                                 style="font-size:15px; font-weight:600;">min</span>
+                                <span style="font-size:14px; font-weight:600;
+                                    color:#dbe4ff;"> / {_h_esp_sem}h
+                                    {_m_esp_sem:02d}min</span>
+                            </div>
+                            <div style="background:rgba(255,255,255,0.25);
+                                border-radius:6px; height:7px; margin-top:8px;
+                                overflow:hidden;">
+                                <div style="width:{_pct_sem}%; height:100%;
+                                    background:{_color_sem}; border-radius:6px;">
+                                </div>
                             </div>
                             <div style="font-size:10.5px; color:#c9d4ff;
-                                margin-top:2px;">
+                                margin-top:6px;">
                                 Lunes {_inicio_semana_ref.strftime('%d/%m')} →
-                                hoy {_hoy_ref_semana.strftime('%d/%m')}
+                                hoy {_hoy_ref_semana.strftime('%d/%m')} ·
+                                {_pct_sem}% de lo pactado · {_break_caption}
                             </div>
                         </div>
-                        <div style="flex:1; min-width:190px;
+                        <div style="flex:1; min-width:220px;
                             background:linear-gradient(135deg,#0e9f6e,#0694a2);
                             border-radius:14px; padding:14px 16px;
                             box-shadow:0 4px 14px rgba(14,159,110,0.35);">
@@ -8490,10 +8655,21 @@ elif opcion == "🔐 Panel de Gestión / Admin":
                                 {_h_mes}<span style="font-size:15px;
                                 font-weight:600;">h</span> {_m_mes:02d}<span
                                 style="font-size:15px; font-weight:600;">min</span>
+                                <span style="font-size:14px; font-weight:600;
+                                    color:#d4f7ec;"> / {_h_esp_mes}h
+                                    {_m_esp_mes:02d}min</span>
+                            </div>
+                            <div style="background:rgba(255,255,255,0.25);
+                                border-radius:6px; height:7px; margin-top:8px;
+                                overflow:hidden;">
+                                <div style="width:{_pct_mes}%; height:100%;
+                                    background:{_color_mes}; border-radius:6px;">
+                                </div>
                             </div>
                             <div style="font-size:10.5px; color:#d4f7ec;
-                                margin-top:2px;">
-                                Acumulado de {mes_ind_sel} {anio_ind_sel}
+                                margin-top:6px;">
+                                Acumulado a la fecha de {mes_ind_sel}
+                                {anio_ind_sel} · {_pct_mes}% de lo pactado
                             </div>
                         </div>
                     </div>
@@ -8802,10 +8978,23 @@ elif opcion == "🔐 Panel de Gestión / Admin":
                                 val_sed_a = [val_sed_p] if val_sed_p else []
 
                             val_pas = ""  # nunca se muestra el hash guardado
+
+                            _val_break_raw = datos_e.get(
+                                "tiene_break_almuerzo", True
+                            )
+                            try:
+                                val_break = (
+                                    True
+                                    if pd.isna(_val_break_raw)
+                                    else bool(_val_break_raw)
+                                )
+                            except (TypeError, ValueError):
+                                val_break = bool(_val_break_raw)
                         else:
                             val_dni = ""
                             val_nom = ""
                             val_car = ""
+                            val_break = True  # por defecto, activado
                             val_sed_p = sedes_lista[0] if sedes_lista else ""
                             val_sed_a = sedes_lista.copy()
                             val_pas = PASSWORD_EMPLEADO_DEFAULT
@@ -8865,6 +9054,20 @@ elif opcion == "🔐 Panel de Gestión / Admin":
                             type="password",
                         )
 
+                        e_tiene_break = st.checkbox(
+                            "🍽️ Tiene hora de break por almuerzo",
+                            value=val_break,
+                            help=(
+                                "Si está activado, se le descuentan los"
+                                " minutos de break de almuerzo"
+                                " (configurables más abajo, en"
+                                " '🍽️ Break de Almuerzo') del cálculo"
+                                " de horas acumuladas de la semana y"
+                                " del mes. Por defecto viene activado"
+                                " para todos los trabajadores nuevos."
+                            ),
+                        )
+
                         col_btn_e1, col_btn_e2 = st.columns(2)
 
                         with col_btn_e1:
@@ -8892,6 +9095,7 @@ elif opcion == "🔐 Panel de Gestión / Admin":
                                             sedes_finales
                                         ),
                                         "fecha_ingreso": e_fecha_ingreso.strip(),
+                                        "tiene_break_almuerzo": e_tiene_break,
                                     }
                                     if e_pass.strip():
                                         # Solo se toca la contraseña si el
@@ -9033,6 +9237,9 @@ elif opcion == "🔐 Panel de Gestión / Admin":
                                                     or hoy_peru().strftime(
                                                         "%Y-%m-%d"
                                                     )
+                                                ),
+                                                "tiene_break_almuerzo": (
+                                                    e_tiene_break
                                                 ),
                                             }
 
@@ -9985,6 +10192,53 @@ elif opcion == "🔐 Panel de Gestión / Admin":
                                             supabase,
                                             st.session_state.empresa_id,
                                             permitir_horas_extra=toggle_hextra,
+                                        )
+                                    except Exception as e:
+                                        st.warning(
+                                            f"No se pudo guardar: {e}"
+                                        )
+                                st.rerun()
+
+                        st.divider()
+                        with st.container(border=True):
+                            st.markdown("#### 🍽️ Break de Almuerzo")
+                            st.caption(
+                                "Cuántos minutos de la jornada se"
+                                " descuentan del acumulado de horas"
+                                " trabajadas (etiquetas de 'Horas esta"
+                                " semana' / 'Horas en el mes') para los"
+                                " trabajadores que SÍ tienen hora de"
+                                " break por almuerzo. Ese Sí/No se"
+                                " define individualmente en 'Crear /"
+                                " Editar Trabajador' — por defecto,"
+                                " todos los trabajadores nuevos lo"
+                                " tienen activado."
+                            )
+                            nuevo_min_break = st.number_input(
+                                "Minutos de break por almuerzo:",
+                                min_value=0,
+                                max_value=180,
+                                step=5,
+                                value=int(
+                                    st.session_state.get(
+                                        "minutos_break_almuerzo", 60
+                                    )
+                                ),
+                            )
+                            if nuevo_min_break != st.session_state.get(
+                                "minutos_break_almuerzo", 60
+                            ):
+                                st.session_state.minutos_break_almuerzo = (
+                                    nuevo_min_break
+                                )
+                                if supabase:
+                                    try:
+                                        guardar_configuracion_sistema(
+                                            supabase,
+                                            st.session_state.empresa_id,
+                                            minutos_break_almuerzo=(
+                                                nuevo_min_break
+                                            ),
                                         )
                                     except Exception as e:
                                         st.warning(
