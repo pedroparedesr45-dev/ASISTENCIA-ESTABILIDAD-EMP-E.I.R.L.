@@ -1855,6 +1855,9 @@ if "permitir_horas_extra" not in st.session_state:
 if "minutos_break_almuerzo" not in st.session_state:
     st.session_state.minutos_break_almuerzo = 60
 
+if "contar_tiempo_fuera_horario" not in st.session_state:
+    st.session_state.contar_tiempo_fuera_horario = True
+
 if "regimen_laboral" not in st.session_state:
     st.session_state.regimen_laboral = "GENERAL"
 
@@ -2458,6 +2461,11 @@ def cargar_configuracion_sistema(_supabase, empresa_id):
             )
             st.session_state.minutos_break_almuerzo = int(
                 cfg.get("minutos_break_almuerzo") or 60
+            )
+            st.session_state.contar_tiempo_fuera_horario = bool(
+                cfg.get("contar_tiempo_fuera_horario", True)
+                if cfg.get("contar_tiempo_fuera_horario") is not None
+                else True
             )
             st.session_state.regimen_laboral = (
                 cfg.get("regimen_laboral") or "GENERAL"
@@ -5041,14 +5049,33 @@ def obtener_horario_oficial(emp_row, df_sedes, fecha_obj):
     return h_ent, h_sal
 
 
-def calcular_horas_trabajadas_periodo(df_periodo, descuento_break_min=0):
+def calcular_horas_trabajadas_periodo(
+    df_periodo,
+    descuento_break_min=0,
+    emp_info=None,
+    df_sedes=None,
+    contar_fuera_de_horario=True,
+):
     """Suma las horas realmente trabajadas (Entrada → Salida, por día)
     dentro del DataFrame de asistencia dado (ya filtrado por trabajador
     y por el rango de fechas que se quiera medir). Días con solo
     Entrada (sin Salida marcada aún) no se cuentan, para no inflar el
     acumulado con un turno todavía abierto. 'descuento_break_min' se
     resta de cada día contado (ej. 60 min de almuerzo), sin dejar que
-    un día individual baje de 0. Devuelve (horas, minutos).
+    un día individual baje de 0.
+
+    'contar_fuera_de_horario' (configurable por la empresa):
+    - True (por defecto): se usa la hora REAL marcada tal cual, así
+      haya llegado antes de su hora o se haya quedado después —
+      comportamiento de siempre.
+    - False: el tiempo se recorta al horario pactado de ESE día (se
+      necesita 'emp_info' y 'df_sedes' para saberlo) — si llegó antes
+      de su hora oficial, ese rato de más no cuenta; si salió después
+      de su hora oficial, tampoco. Si llegó tarde o salió temprano
+      (dentro del horario pactado), eso sí sigue contando normal — el
+      recorte solo afecta el tiempo por FUERA de lo pactado.
+
+    Devuelve (horas, minutos).
     """
     if df_periodo is None or df_periodo.empty:
         return 0, 0
@@ -5068,6 +5095,29 @@ def calcular_horas_trabajadas_periodo(df_periodo, descuento_break_min=0):
             _t_sal = datetime.strptime(
                 str(_sal_g.iloc[0].get("Hora Registrada", "")), "%H:%M:%S"
             )
+
+            if not contar_fuera_de_horario and emp_info is not None:
+                try:
+                    _f_dia = datetime.strptime(
+                        _fecha_g, "%Y-%m-%d"
+                    ).date()
+                    _h_ofic_ent, _h_ofic_sal = obtener_horario_oficial(
+                        emp_info, df_sedes, _f_dia
+                    )
+                    _t_ofic_ent = datetime.strptime(
+                        str(_h_ofic_ent), "%H:%M:%S"
+                    )
+                    _t_ofic_sal = datetime.strptime(
+                        str(_h_ofic_sal), "%H:%M:%S"
+                    )
+                    # Se recorta al horario pactado: no cuenta lo que
+                    # llegó antes de su hora, ni lo que se quedó
+                    # después de su hora.
+                    _t_ent = max(_t_ent, _t_ofic_ent)
+                    _t_sal = min(_t_sal, _t_ofic_sal)
+                except Exception:
+                    pass
+
             _delta_min = (_t_sal - _t_ent).total_seconds() / 60
             if _delta_min < 0:
                 _delta_min += 24 * 60  # turno que cruza la medianoche
@@ -5101,25 +5151,37 @@ def emp_tiene_break_almuerzo(emp_row):
 
 
 def calcular_horas_esperadas_periodo(
-    emp_info, df_sedes, fecha_inicio, fecha_fin, descuento_break_min=0
+    emp_info,
+    df_sedes,
+    fecha_inicio,
+    fecha_fin,
+    descuento_break_min=0,
+    limitar_a_hoy=False,
 ):
-    """Calcula cuántas horas le TOCABA acumular al trabajador entre
-    'fecha_inicio' y 'fecha_fin' (ambas incluidas), día por día, según
-    SU horario realmente pactado — respeta horario_personalizado si lo
-    tiene (incluyendo qué días son laborables para él en particular),
-    o si no, el horario de su sede y los días laborables generales de
-    la empresa. Los feriados oficiales no suman horas esperadas. Se le
-    resta el break de almuerzo a cada día contado, igual que a las
-    horas reales, para comparar manzanas con manzanas. Nunca evalúa
-    fechas futuras (más allá de 'hoy'). Devuelve (horas, minutos).
+    """Calcula la META de horas pactadas entre 'fecha_inicio' y
+    'fecha_fin' (ambas incluidas), día por día, según SU horario
+    realmente pactado — respeta horario_personalizado si lo tiene
+    (incluyendo qué días son laborables para él en particular), o si
+    no, el horario de su sede y los días laborables generales de la
+    empresa. Los feriados oficiales no suman horas. Se le resta el
+    break de almuerzo a cada día contado, igual que a las horas
+    reales, para comparar manzanas con manzanas.
+
+    Por defecto ('limitar_a_hoy=False') calcula el PERIODO COMPLETO
+    (ej. toda la semana Lunes-Domingo, todo el mes) — esa es la meta
+    fija que se debe completar, no se prorratea según cuántos días ya
+    pasaron. Pasa 'limitar_a_hoy=True' si en algún caso sí se
+    necesitara la versión "lo que tocaba hasta hoy". Devuelve
+    (horas, minutos).
     """
     if fecha_inicio > fecha_fin:
         return 0, 0
 
-    _hoy_limite = hoy_peru()
-    _fecha_fin_real = min(fecha_fin, _hoy_limite)
-    if fecha_inicio > _fecha_fin_real:
-        return 0, 0
+    _fecha_fin_real = fecha_fin
+    if limitar_a_hoy:
+        _fecha_fin_real = min(fecha_fin, hoy_peru())
+        if fecha_inicio > _fecha_fin_real:
+            return 0, 0
 
     try:
         _h_personal = json.loads(
@@ -8534,6 +8596,7 @@ elif opcion == "🔐 Panel de Gestión / Admin":
                     _inicio_semana_ref = _hoy_ref_semana - timedelta(
                         days=_hoy_ref_semana.weekday()
                     )
+                    _fin_semana_ref = _inicio_semana_ref + timedelta(days=6)
                     _df_asist_emp_full = df_asistencia[
                         df_asistencia["Empleado"] == emp_ind_sel
                     ]
@@ -8551,19 +8614,37 @@ elif opcion == "🔐 Panel de Gestión / Admin":
                         if _break_activo_emp
                         else 0
                     )
+                    _contar_fuera_horario = bool(
+                        st.session_state.get(
+                            "contar_tiempo_fuera_horario", True
+                        )
+                    )
 
                     _h_semana, _m_semana = calcular_horas_trabajadas_periodo(
-                        _df_semana_actual, _min_break_emp
+                        _df_semana_actual,
+                        _min_break_emp,
+                        emp_info=emp_info,
+                        df_sedes=df_sedes,
+                        contar_fuera_de_horario=_contar_fuera_horario,
                     )
                     _h_mes, _m_mes = calcular_horas_trabajadas_periodo(
-                        df_asist_emp, _min_break_emp
+                        df_asist_emp,
+                        _min_break_emp,
+                        emp_info=emp_info,
+                        df_sedes=df_sedes,
+                        contar_fuera_de_horario=_contar_fuera_horario,
                     )
 
+                    # Meta = periodo COMPLETO según su horario pactado
+                    # (toda la semana Lun-Dom, todo el mes) — no se
+                    # prorratea a "lo que tocaba hasta hoy", así la
+                    # barra se va llenando hacia esa meta fija a
+                    # medida que van pasando los días laborables.
                     _h_esp_sem, _m_esp_sem = calcular_horas_esperadas_periodo(
                         emp_info,
                         df_sedes,
                         _inicio_semana_ref,
-                        _hoy_ref_semana,
+                        _fin_semana_ref,
                         _min_break_emp,
                     )
                     _primer_dia_mes_esp = date(anio_ind_sel, m_num, 1)
@@ -8636,9 +8717,9 @@ elif opcion == "🔐 Panel de Gestión / Admin":
                             </div>
                             <div style="font-size:10.5px; color:#c9d4ff;
                                 margin-top:6px;">
-                                Lunes {_inicio_semana_ref.strftime('%d/%m')} →
-                                hoy {_hoy_ref_semana.strftime('%d/%m')} ·
-                                {_pct_sem}% de lo pactado · {_break_caption}
+                                Meta: Lun {_inicio_semana_ref.strftime('%d/%m')} a
+                                Dom {_fin_semana_ref.strftime('%d/%m')} ·
+                                {_pct_sem}% cumplido · {_break_caption}
                             </div>
                         </div>
                         <div style="flex:1; min-width:220px;
@@ -8668,8 +8749,7 @@ elif opcion == "🔐 Panel de Gestión / Admin":
                             </div>
                             <div style="font-size:10.5px; color:#d4f7ec;
                                 margin-top:6px;">
-                                Acumulado a la fecha de {mes_ind_sel}
-                                {anio_ind_sel} · {_pct_mes}% de lo pactado
+                                Meta del mes completo · {_pct_mes}% cumplido
                             </div>
                         </div>
                     </div>
@@ -10238,6 +10318,68 @@ elif opcion == "🔐 Panel de Gestión / Admin":
                                             st.session_state.empresa_id,
                                             minutos_break_almuerzo=(
                                                 nuevo_min_break
+                                            ),
+                                        )
+                                    except Exception as e:
+                                        st.warning(
+                                            f"No se pudo guardar: {e}"
+                                        )
+                                st.rerun()
+
+                        st.divider()
+                        with st.container(border=True):
+                            st.markdown(
+                                "#### 🎯 Conteo de Horas Fuera del"
+                                " Horario Pactado"
+                            )
+                            st.caption(
+                                "Afecta las etiquetas de 'Horas esta"
+                                " semana' / 'Horas en el mes' de cada"
+                                " trabajador (no las tardanzas ni el"
+                                " sistema de horas extra, que siguen"
+                                " funcionando igual que siempre)."
+                            )
+                            _valor_actual_fuera_horario = bool(
+                                st.session_state.get(
+                                    "contar_tiempo_fuera_horario", True
+                                )
+                            )
+                            toggle_fuera_horario = st.toggle(
+                                "Contar el tiempo tal como se marcó,"
+                                " aunque se salga del horario pactado",
+                                value=_valor_actual_fuera_horario,
+                                help=(
+                                    "✅ ACTIVADO (por defecto): se usa la"
+                                    " hora REAL marcada tal cual — si"
+                                    " llegó antes de su hora o se quedó"
+                                    " después, ese tiempo de más SÍ"
+                                    " cuenta en el acumulado. Si llega"
+                                    " tarde o sale temprano, de todas"
+                                    " formas se cuenta lo que sí"
+                                    " trabajó (eso no depende de este"
+                                    " interruptor).\n\n"
+                                    "⬜ DESACTIVADO: el conteo se recorta"
+                                    " estrictamente al horario pactado"
+                                    " de cada trabajador — el tiempo por"
+                                    " FUERA de su horario (llegadas"
+                                    " tempranas, salidas tardías) NO se"
+                                    " suma al acumulado de horas."
+                                ),
+                            )
+                            if (
+                                toggle_fuera_horario
+                                != _valor_actual_fuera_horario
+                            ):
+                                st.session_state.contar_tiempo_fuera_horario = (
+                                    toggle_fuera_horario
+                                )
+                                if supabase:
+                                    try:
+                                        guardar_configuracion_sistema(
+                                            supabase,
+                                            st.session_state.empresa_id,
+                                            contar_tiempo_fuera_horario=(
+                                                toggle_fuera_horario
                                             ),
                                         )
                                     except Exception as e:
