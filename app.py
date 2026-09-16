@@ -5229,6 +5229,290 @@ def calcular_horas_esperadas_periodo(
     return total_min // 60, total_min % 60
 
 
+def calcular_deficit_y_extra_mes(
+    df_periodo_mes,
+    emp_info,
+    df_sedes,
+    fecha_inicio_mes,
+    fecha_fin_mes,
+    descuento_break_min,
+    contar_fuera_de_horario,
+):
+    """Recorre día por día el mes (desde fecha_inicio_mes hasta
+    fecha_fin_mes, sin pasar de 'hoy' — así se va prorrateando en
+    tiempo real conforme pasan los días) y calcula DOS acumulados
+    independientes que NO se compensan entre sí:
+
+    - DÉFICIT: minutos que le faltaron cada día para llegar a su meta
+      de ese día (Faltas cuentan el turno completo, Tardanzas y
+      salidas tempranas cuentan lo que faltó). Un día con déficit no
+      se cancela con otro día donde trabajó de más — es un acumulado
+      de "lo que no se cumplió", que solo sube.
+    - EXTRA: minutos trabajados de más cada día, sin restar los días
+      de déficit — igual, solo sube.
+
+    El interruptor de empresa 'contar_tiempo_fuera_de_horario' cambia
+    qué cuenta como "tiempo real" de cada día, IGUAL que en las
+    etiquetas de Horas, para que los 3 acumulados (Horas, Déficit,
+    Extra) sean siempre consistentes entre sí:
+    - ACTIVADO: el tiempo real de cada día es la hora marcada tal
+      cual (aunque llegó antes o se quedó después). El déficit sale
+      de comparar ese real contra la meta del día; el extra es lo que
+      pasó de esa meta.
+    - DESACTIVADO: el tiempo real de cada día se recorta al horario
+      pactado (no se cuenta lo de antes/después). El déficit ahí ya
+      incluye, sin necesidad de casos aparte, tanto las Faltas (real
+      0) como las Tardanzas y salidas tempranas (real recortado). El
+      extra, en este modo, pasa a mostrar el tiempo real trabajado
+      FUERA del horario pactado (llegadas tempranas + salidas
+      tardías) — el que no cuenta para las Horas, pero que igual es
+      útil ver cuánto fue.
+
+    Devuelve ((h_deficit, m_deficit), (h_extra, m_extra)).
+    """
+    _hoy_limite = hoy_peru()
+    _fecha_fin_real = min(fecha_fin_mes, _hoy_limite)
+    if fecha_inicio_mes > _fecha_fin_real:
+        return (0, 0), (0, 0)
+
+    _fechas_col = (
+        df_periodo_mes["Fecha"].astype(str).str.slice(0, 10)
+        if df_periodo_mes is not None and not df_periodo_mes.empty
+        else pd.Series([], dtype=str)
+    )
+
+    try:
+        _h_personal = json.loads(
+            emp_info.get("horario_personalizado", "{}") or "{}"
+        )
+    except Exception:
+        _h_personal = {}
+
+    total_deficit_min = 0.0
+    total_extra_min = 0.0
+    _f = fecha_inicio_mes
+    while _f <= _fecha_fin_real:
+        _f_str = _f.strftime("%Y-%m-%d")
+        _nombre_dia = DIAS_SEMANA_MAP[_f.weekday()]
+
+        if _f_str in FERIADOS_OFICIALES:
+            _f += timedelta(days=1)
+            continue
+
+        if _nombre_dia in _h_personal:
+            _es_laborable = _h_personal[_nombre_dia].get("activo", True)
+        else:
+            _es_laborable = (
+                _nombre_dia in st.session_state.dias_laborables
+            )
+
+        if not _es_laborable:
+            _f += timedelta(days=1)
+            continue
+
+        # --- Meta del día ---
+        _h_ent_o, _h_sal_o = obtener_horario_oficial(
+            emp_info, df_sedes, _f
+        )
+        try:
+            _t_ent_o = datetime.strptime(str(_h_ent_o), "%H:%M:%S")
+            _t_sal_o = datetime.strptime(str(_h_sal_o), "%H:%M:%S")
+            _meta_min = (_t_sal_o - _t_ent_o).total_seconds() / 60
+            if _meta_min < 0:
+                _meta_min += 24 * 60
+            if not (0 < _meta_min < 20 * 60):
+                _f += timedelta(days=1)
+                continue
+            _meta_min = max(0.0, _meta_min - descuento_break_min)
+        except Exception:
+            _f += timedelta(days=1)
+            continue
+
+        # --- Real del día (según marcación, si existe) ---
+        _grupo_dia = (
+            df_periodo_mes[_fechas_col == _f_str]
+            if not _fechas_col.empty
+            else pd.DataFrame()
+        )
+        _ent_dia = (
+            _grupo_dia[_grupo_dia["Tipo Marcación"] == "Entrada"]
+            if not _grupo_dia.empty
+            else pd.DataFrame()
+        )
+        _sal_dia = (
+            _grupo_dia[_grupo_dia["Tipo Marcación"] == "Salida"]
+            if not _grupo_dia.empty
+            else pd.DataFrame()
+        )
+
+        if _ent_dia.empty or _sal_dia.empty:
+            # Falta (o turno todavía abierto sin Salida): no hay horas
+            # reales que contar ese día -> déficit = la meta completa.
+            total_deficit_min += _meta_min
+            _f += timedelta(days=1)
+            continue
+
+        try:
+            _t_ent = datetime.strptime(
+                str(_ent_dia.iloc[0].get("Hora Registrada", "")),
+                "%H:%M:%S",
+            )
+            _t_sal = datetime.strptime(
+                str(_sal_dia.iloc[0].get("Hora Registrada", "")),
+                "%H:%M:%S",
+            )
+        except Exception:
+            total_deficit_min += _meta_min
+            _f += timedelta(days=1)
+            continue
+
+        if contar_fuera_de_horario:
+            _real_min = (_t_sal - _t_ent).total_seconds() / 60
+            if _real_min < 0:
+                _real_min += 24 * 60
+            if not (0 < _real_min < 20 * 60):
+                _f += timedelta(days=1)
+                continue
+            _real_min = max(0.0, _real_min - descuento_break_min)
+
+            if _real_min < _meta_min:
+                total_deficit_min += _meta_min - _real_min
+            else:
+                total_extra_min += _real_min - _meta_min
+        else:
+            _t_ent_recortado = max(_t_ent, _t_ent_o)
+            _t_sal_recortado = min(_t_sal, _t_sal_o)
+            _real_min = (
+                _t_sal_recortado - _t_ent_recortado
+            ).total_seconds() / 60
+            if _real_min < 0:
+                _real_min = 0.0
+            _real_min = max(0.0, _real_min - descuento_break_min)
+
+            if _real_min < _meta_min:
+                total_deficit_min += _meta_min - _real_min
+
+            # Extra = tiempo trabajado FUERA del horario pactado
+            # (no cuenta para Horas en este modo, pero se muestra
+            # igual como informativo).
+            _antes = max(0.0, (_t_ent_o - _t_ent).total_seconds() / 60)
+            _despues = max(0.0, (_t_sal - _t_sal_o).total_seconds() / 60)
+            if _antes < 20 * 60:
+                total_extra_min += _antes
+            if _despues < 20 * 60:
+                total_extra_min += _despues
+
+        _f += timedelta(days=1)
+
+    total_deficit_min = int(round(total_deficit_min))
+    total_extra_min = int(round(total_extra_min))
+    return (
+        (total_deficit_min // 60, total_deficit_min % 60),
+        (total_extra_min // 60, total_extra_min % 60),
+    )
+
+
+def evaluar_cumplimiento_semanas_mes(
+    df_asist_emp_full,
+    emp_info,
+    df_sedes,
+    anio_sel,
+    mes_num_sel,
+    descuento_break_min,
+):
+    """Para cada semana calendario (Lunes-Domingo) que toca el mes
+    seleccionado, calcula si el trabajador cumplió o no su meta de
+    horas pactadas de ESA semana completa. Devuelve una lista de dicts
+    con: numero (1,2,3...), fecha_inicio, fecha_fin, estado
+    ('cumplida' | 'no_cumplida' | 'en_curso' | 'futura'),
+    horas_reales (h,m), horas_meta (h,m), pct.
+
+    - 'cumplida' / 'no_cumplida': la semana ya terminó (Domingo ya
+      pasó) -> se compara el total real de esa semana completa contra
+      su meta completa.
+    - 'en_curso': la semana que contiene 'hoy' -> todavía no se puede
+      decir si la cumplió o no, se muestra su avance parcial.
+    - 'futura': semana que todavía no empieza.
+    """
+    _primer_dia_mes = date(anio_sel, mes_num_sel, 1)
+    _ultimo_dia_mes = date(
+        anio_sel, mes_num_sel, calendar.monthrange(anio_sel, mes_num_sel)[1]
+    )
+    _hoy = hoy_peru()
+
+    _inicio_1ra_semana = _primer_dia_mes - timedelta(
+        days=_primer_dia_mes.weekday()
+    )
+
+    _fechas_col = (
+        df_asist_emp_full["Fecha"].astype(str).str.slice(0, 10)
+        if df_asist_emp_full is not None and not df_asist_emp_full.empty
+        else pd.Series([], dtype=str)
+    )
+
+    resultados = []
+    _num_semana = 1
+    _inicio_sem = _inicio_1ra_semana
+    while _inicio_sem <= _ultimo_dia_mes:
+        _fin_sem = _inicio_sem + timedelta(days=6)
+
+        if _fin_sem < _hoy:
+            _estado = "cumplida"  # se corrige abajo si no llegó a la meta
+        elif _inicio_sem > _hoy:
+            _estado = "futura"
+        else:
+            _estado = "en_curso"
+
+        if _estado == "futura":
+            resultados.append({
+                "numero": _num_semana,
+                "fecha_inicio": _inicio_sem,
+                "fecha_fin": _fin_sem,
+                "estado": "futura",
+                "horas_reales": (0, 0),
+                "horas_meta": (0, 0),
+                "pct": 0,
+            })
+            _num_semana += 1
+            _inicio_sem += timedelta(days=7)
+            continue
+
+        _df_sem = df_asist_emp_full[
+            (_fechas_col >= _inicio_sem.strftime("%Y-%m-%d"))
+            & (_fechas_col <= min(_fin_sem, _hoy).strftime("%Y-%m-%d"))
+        ]
+        _h_real, _m_real = calcular_horas_trabajadas_periodo(
+            _df_sem, descuento_break_min
+        )
+        _h_meta, _m_meta = calcular_horas_esperadas_periodo(
+            emp_info, df_sedes, _inicio_sem, _fin_sem, descuento_break_min
+        )
+        _min_real = _h_real * 60 + _m_real
+        _min_meta = _h_meta * 60 + _m_meta
+        _pct = (
+            100
+            if _min_meta <= 0
+            else max(0, min(999, round(_min_real / _min_meta * 100)))
+        )
+
+        if _estado == "cumplida" and _min_real < _min_meta:
+            _estado = "no_cumplida"
+
+        resultados.append({
+            "numero": _num_semana,
+            "fecha_inicio": _inicio_sem,
+            "fecha_fin": _fin_sem,
+            "estado": _estado,
+            "horas_reales": (_h_real, _m_real),
+            "horas_meta": (_h_meta, _m_meta),
+            "pct": _pct,
+        })
+        _num_semana += 1
+        _inicio_sem += timedelta(days=7)
+
+    return resultados
+
+
 def calcular_distancia(lat1, lon1, lat2, lon2):
     R = 6371000
     phi1, phi2 = np.radians(lat1), np.radians(lat2)
@@ -8673,6 +8957,24 @@ elif opcion == "🔐 Panel de Gestión / Admin":
                             return "#ffc93c"
                         return "#ff6b6b"
 
+                    # --- Déficit y Extra ACUMULADOS DEL MES, prorrateados
+                    # día a día hasta hoy (o hasta fin de mes si se está
+                    # viendo un mes ya cerrado). No se compensan entre
+                    # sí: un día con déficit no se cancela con otro día
+                    # trabajado de más. ---
+                    (
+                        (_h_deficit_mes, _m_deficit_mes),
+                        (_h_extra_mes, _m_extra_mes),
+                    ) = calcular_deficit_y_extra_mes(
+                        df_asist_emp,
+                        emp_info,
+                        df_sedes,
+                        _primer_dia_mes_esp,
+                        _ultimo_dia_mes_esp,
+                        _min_break_emp,
+                        _contar_fuera_horario,
+                    )
+
                     _pct_sem = _pct_cumplido(
                         _h_semana, _m_semana, _h_esp_sem, _m_esp_sem
                     )
@@ -8752,6 +9054,128 @@ elif opcion == "🔐 Panel de Gestión / Admin":
                                 Meta del mes completo · {_pct_mes}% cumplido
                             </div>
                         </div>
+                    </div>
+                    """)
+
+                    _extra_ayuda = (
+                        "tiempo fuera de su horario, no cuenta en Horas"
+                        if not _contar_fuera_horario
+                        else "trabajado de más sobre la meta de cada día"
+                    )
+                    _deficit_ayuda = (
+                        "faltas + tardanzas + salidas antes de hora"
+                        if not _contar_fuera_horario
+                        else "días donde no llegó a la meta de ese día"
+                    )
+                    render_html(f"""
+                    <div style="display:flex; gap:10px; flex-wrap:wrap;
+                        margin:0 0 16px 0;">
+                        <div style="flex:1; min-width:220px;
+                            background:linear-gradient(135deg,#c02626,#7a1c1c);
+                            border-radius:14px; padding:14px 16px;
+                            box-shadow:0 4px 14px rgba(192,38,38,0.30);">
+                            <div style="font-size:11px; font-weight:700;
+                                letter-spacing:0.5px; color:#ffd9d9;
+                                text-transform:uppercase;">
+                                📉 Minutos No Cumplidos (mes)
+                            </div>
+                            <div style="font-size:26px; font-weight:800;
+                                color:#ffffff; margin-top:2px;">
+                                {_h_deficit_mes}<span style="font-size:15px;
+                                font-weight:600;">h</span> {_m_deficit_mes:02d}<span
+                                style="font-size:15px; font-weight:600;">min</span>
+                            </div>
+                            <div style="font-size:10.5px; color:#ffd9d9;
+                                margin-top:6px;">
+                                Acumulado de {mes_ind_sel.lower()} a la fecha ·
+                                {_deficit_ayuda}
+                            </div>
+                        </div>
+                        <div style="flex:1; min-width:220px;
+                            background:linear-gradient(135deg,#7c3aed,#c026d3);
+                            border-radius:14px; padding:14px 16px;
+                            box-shadow:0 4px 14px rgba(124,58,237,0.30);">
+                            <div style="font-size:11px; font-weight:700;
+                                letter-spacing:0.5px; color:#ecdbff;
+                                text-transform:uppercase;">
+                                ⚡ Minutos Extra Acumulados (mes)
+                            </div>
+                            <div style="font-size:26px; font-weight:800;
+                                color:#ffffff; margin-top:2px;">
+                                {_h_extra_mes}<span style="font-size:15px;
+                                font-weight:600;">h</span> {_m_extra_mes:02d}<span
+                                style="font-size:15px; font-weight:600;">min</span>
+                            </div>
+                            <div style="font-size:10.5px; color:#ecdbff;
+                                margin-top:6px;">
+                                Acumulado de {mes_ind_sel.lower()} a la fecha ·
+                                {_extra_ayuda}
+                            </div>
+                        </div>
+                    </div>
+                    """)
+
+                    # --- Tira compacta: qué semanas del mes cumplieron
+                    # su meta de horas y cuáles no. Una sola línea, con
+                    # detalle exacto en el tooltip (mantener el dedo/
+                    # mouse encima). ---
+                    _semanas_estado = evaluar_cumplimiento_semanas_mes(
+                        df_asist_emp,
+                        emp_info,
+                        df_sedes,
+                        anio_ind_sel,
+                        m_num,
+                        _min_break_emp,
+                    )
+                    _estilo_semana = {
+                        "cumplida": ("#0e9f6e", "✅"),
+                        "no_cumplida": ("#c02626", "❌"),
+                        "en_curso": ("#c9820a", "🔄"),
+                        "futura": ("#3a3f4b", "⚪"),
+                    }
+                    _pildoras_html = ""
+                    for _sem in _semanas_estado:
+                        _color_pill, _icono_pill = _estilo_semana[
+                            _sem["estado"]
+                        ]
+                        _hr, _mr = _sem["horas_reales"]
+                        _he, _me = _sem["horas_meta"]
+                        if _sem["estado"] == "futura":
+                            _texto_tooltip = (
+                                f"Semana {_sem['numero']}"
+                                f" ({_sem['fecha_inicio'].strftime('%d/%m')}-"
+                                f"{_sem['fecha_fin'].strftime('%d/%m')}):"
+                                " todavía no empieza"
+                            )
+                        else:
+                            _texto_tooltip = (
+                                f"Semana {_sem['numero']}"
+                                f" ({_sem['fecha_inicio'].strftime('%d/%m')}-"
+                                f"{_sem['fecha_fin'].strftime('%d/%m')}):"
+                                f" {_hr}h{_mr:02d} / {_he}h{_me:02d}"
+                                f" ({_sem['pct']}%)"
+                            )
+                        _pildoras_html += f"""
+                        <div title="{_texto_tooltip}" style="display:flex;
+                            align-items:center; gap:5px;
+                            background:{_color_pill}22; border:1px solid
+                            {_color_pill}; border-radius:20px; padding:4px 10px;
+                            font-size:12px; color:#ffffff; cursor:default;
+                            white-space:nowrap;">
+                            <span>{_icono_pill}</span>
+                            <span style="font-weight:700;">S{_sem['numero']}</span>
+                            {f'<span style="opacity:0.85;">{_sem["pct"]}%</span>' if _sem['estado'] in ('en_curso',) else ''}
+                        </div>
+                        """
+                    render_html(f"""
+                    <div style="display:flex; align-items:center;
+                        gap:8px; flex-wrap:wrap; margin:0 0 16px 0;">
+                        <span style="font-size:11px; font-weight:700;
+                            color:#9aa4b2; text-transform:uppercase;
+                            letter-spacing:0.5px; margin-right:2px;">
+                            📊 Semanas del mes:
+                        </span>
+                        {_pildoras_html}
                     </div>
                     """)
 
