@@ -8555,18 +8555,37 @@ elif opcion == "🔐 Panel de Gestión / Admin":
                                     )
                                     & (
                                         df_asist_actual["Empleado"]
-                                        == emp_ind_sel
+                                        .astype(str)
+                                        .str.strip()
+                                        == str(emp_ind_sel).strip()
                                     )
                                     & (
                                         df_asist_actual["Fecha"]
                                         .astype(str)
+                                        .str.strip()
                                         .str.startswith(prefix_ind)
                                     )
                                     & _condicion_foto
                                 )
-                                df_editables = df_asist_actual[mask_ed]
-
+                                df_editables = df_asist_actual[mask_ed].copy()
                                 if not df_editables.empty:
+                                    # Se limpian espacios en blanco que
+                                    # puedan haberse colado en estas
+                                    # columnas (causa más probable de
+                                    # que un registro "invisible" para
+                                    # los filtros quede como duplicado
+                                    # fantasma en la Bitácora).
+                                    df_editables["Fecha"] = (
+                                        df_editables["Fecha"]
+                                        .astype(str)
+                                        .str.strip()
+                                    )
+                                    df_editables["Tipo Marcación"] = (
+                                        df_editables["Tipo Marcación"]
+                                        .astype(str)
+                                        .str.strip()
+                                    )
+
                                     fechas_disponibles = sorted(
                                         df_editables["Fecha"].unique()
                                     )
@@ -8766,15 +8785,21 @@ elif opcion == "🔐 Panel de Gestión / Admin":
                                                 )
                                                 & (
                                                     df_asist_fresco["Empleado"]
-                                                    == emp_ind_sel
+                                                    .astype(str)
+                                                    .str.strip()
+                                                    == str(emp_ind_sel).strip()
                                                 )
                                                 & (
                                                     df_asist_fresco["Fecha"]
-                                                    == f_edit_sel
+                                                    .astype(str)
+                                                    .str.strip()
+                                                    == str(f_edit_sel).strip()
                                                 )
                                                 & (
                                                     df_asist_fresco["Tipo Marcación"]
-                                                    == tipo_a_editar
+                                                    .astype(str)
+                                                    .str.strip()
+                                                    == str(tipo_a_editar).strip()
                                                 )
                                             )
 
@@ -8950,19 +8975,31 @@ elif opcion == "🔐 Panel de Gestión / Admin":
                                                         df_asist_borrar[
                                                             "Empleado"
                                                         ]
-                                                        == emp_ind_sel
+                                                        .astype(str)
+                                                        .str.strip()
+                                                        == str(
+                                                            emp_ind_sel
+                                                        ).strip()
                                                     )
                                                     & (
                                                         df_asist_borrar[
                                                             "Fecha"
                                                         ]
-                                                        == f_edit_sel
+                                                        .astype(str)
+                                                        .str.strip()
+                                                        == str(
+                                                            f_edit_sel
+                                                        ).strip()
                                                     )
                                                     & (
                                                         df_asist_borrar[
                                                             "Tipo Marcación"
                                                         ]
-                                                        == tipo_a_editar
+                                                        .astype(str)
+                                                        .str.strip()
+                                                        == str(
+                                                            tipo_a_editar
+                                                        ).strip()
                                                     )
                                                 )
                                                 df_asist_borrar = (
