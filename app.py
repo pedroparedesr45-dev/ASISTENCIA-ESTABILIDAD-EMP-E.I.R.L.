@@ -8912,6 +8912,46 @@ elif opcion == "🔐 Panel de Gestión / Admin":
                                             df_asist_fresco.to_csv(
                                                 CSV_ASISTENCIA, index=False
                                             )
+
+                                        # FIX CLAVE: la app sincroniza
+                                        # cada pocos segundos desde
+                                        # Supabase (tabla
+                                        # marcaciones_efimeras) hacia el
+                                        # CSV local — si el registro
+                                        # original (ej. la Tardanza de
+                                        # las 14:05) seguía existiendo
+                                        # ALLÁ, la próxima sincronización
+                                        # lo volvía a traer y "resucitaba"
+                                        # el duplicado, sin importar
+                                        # cuántas veces se limpiara el
+                                        # CSV local. Se borra también en
+                                        # Supabase para que no vuelva.
+                                        if supabase:
+                                            try:
+                                                supabase.table(
+                                                    "marcaciones_efimeras"
+                                                ).delete().eq(
+                                                    "empresa_id",
+                                                    str(
+                                                        st.session_state.empresa_id
+                                                    ),
+                                                ).eq(
+                                                    "nombre", emp_ind_sel
+                                                ).eq(
+                                                    "fecha", f_edit_sel
+                                                ).eq(
+                                                    "tipo", tipo_a_editar
+                                                ).execute()
+                                            except Exception as _e_sup_del:
+                                                st.warning(
+                                                    "Se guardó local, pero no"
+                                                    " se pudo limpiar el"
+                                                    " registro original en"
+                                                    f" la nube ({_e_sup_del})."
+                                                    " Podría resucitar en la"
+                                                    " próxima sincronización."
+                                                )
+
                                         st.success(
                                             f"Registro de {tipo_a_editar} del"
                                             f" día {f_edit_sel} guardado"
@@ -9011,6 +9051,43 @@ elif opcion == "🔐 Panel de Gestión / Admin":
                                                     CSV_ASISTENCIA,
                                                     index=False,
                                                 )
+
+                                            # FIX CLAVE: igual que en
+                                            # "Guardar Ajuste Manual" — si
+                                            # no se borra también en
+                                            # Supabase, la próxima
+                                            # sincronización automática
+                                            # (cada pocos segundos) vuelve
+                                            # a traer este mismo registro
+                                            # desde la nube y "resucita"
+                                            # lo que se acaba de borrar.
+                                            if supabase:
+                                                try:
+                                                    supabase.table(
+                                                        "marcaciones_efimeras"
+                                                    ).delete().eq(
+                                                        "empresa_id",
+                                                        str(
+                                                            st.session_state.empresa_id
+                                                        ),
+                                                    ).eq(
+                                                        "nombre", emp_ind_sel
+                                                    ).eq(
+                                                        "fecha", f_edit_sel
+                                                    ).eq(
+                                                        "tipo", tipo_a_editar
+                                                    ).execute()
+                                                except Exception as _e_sup_del2:
+                                                    st.warning(
+                                                        "Se borró local, pero"
+                                                        " no se pudo borrar"
+                                                        " en la nube"
+                                                        f" ({_e_sup_del2})."
+                                                        " Podría resucitar en"
+                                                        " la próxima"
+                                                        " sincronización."
+                                                    )
+
                                             st.success(
                                                 f"Marcación de"
                                                 f" {tipo_a_editar} del"
