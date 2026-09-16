@@ -5035,6 +5035,43 @@ def obtener_horario_oficial(emp_row, df_sedes, fecha_obj):
     return h_ent, h_sal
 
 
+def calcular_horas_trabajadas_periodo(df_periodo):
+    """Suma las horas realmente trabajadas (Entrada → Salida, por día)
+    dentro del DataFrame de asistencia dado (ya filtrado por trabajador
+    y por el rango de fechas que se quiera medir). Días con solo
+    Entrada (sin Salida marcada aún) no se cuentan, para no inflar el
+    acumulado con un turno todavía abierto. Devuelve (horas, minutos).
+    """
+    if df_periodo is None or df_periodo.empty:
+        return 0, 0
+
+    total_min = 0.0
+    _fechas_col = df_periodo["Fecha"].astype(str).str.slice(0, 10)
+    for _fecha_g in _fechas_col.unique():
+        _grupo = df_periodo[_fechas_col == _fecha_g]
+        _ent_g = _grupo[_grupo["Tipo Marcación"] == "Entrada"]
+        _sal_g = _grupo[_grupo["Tipo Marcación"] == "Salida"]
+        if _ent_g.empty or _sal_g.empty:
+            continue
+        try:
+            _t_ent = datetime.strptime(
+                str(_ent_g.iloc[0].get("Hora Registrada", "")), "%H:%M:%S"
+            )
+            _t_sal = datetime.strptime(
+                str(_sal_g.iloc[0].get("Hora Registrada", "")), "%H:%M:%S"
+            )
+            _delta_min = (_t_sal - _t_ent).total_seconds() / 60
+            if _delta_min < 0:
+                _delta_min += 24 * 60  # turno que cruza la medianoche
+            if 0 < _delta_min < 20 * 60:  # descarta datos corruptos (>20h)
+                total_min += _delta_min
+        except Exception:
+            continue
+
+    total_min = int(round(total_min))
+    return total_min // 60, total_min % 60
+
+
 def calcular_distancia(lat1, lon1, lat2, lon2):
     R = 6371000
     phi1, phi2 = np.radians(lat1), np.radians(lat2)
@@ -8223,6 +8260,96 @@ elif opcion == "🔐 Panel de Gestión / Admin":
                                             " con éxito."
                                         )
                                         st.rerun()
+
+                                    # --- Exclusivo Developer: borrar la
+                                    # marcación en vez de editarla, para
+                                    # que el propio trabajador la vuelva
+                                    # a marcar él mismo (ej. se equivocó
+                                    # de tipo, la foto quedó mal, o
+                                    # simplemente se prefiere que quede
+                                    # el registro real en vez de uno
+                                    # corregido a mano). ---
+                                    if st.session_state.developer_global:
+                                        st.markdown("---")
+                                        st.caption(
+                                            "🧪 Developer: en vez de"
+                                            " corregir esta marcación a"
+                                            " mano, puedes borrarla para"
+                                            f" que {emp_ind_sel} entre a"
+                                            " la app y la marque de"
+                                            " nuevo él mismo (con su"
+                                            " propia foto/GPS reales)."
+                                        )
+                                        _confirmar_borrado = st.checkbox(
+                                            f"Sí, borrar la marcación de"
+                                            f" {tipo_a_editar} del"
+                                            f" {f_edit_sel} de"
+                                            f" {emp_ind_sel}",
+                                            key=(
+                                                "confirmar_borrado_"
+                                                f"{f_edit_sel}_{tipo_a_editar}"
+                                            ),
+                                        )
+                                        if st.button(
+                                            "🗑️ Borrar esta marcación"
+                                            " (para que la vuelva a"
+                                            " marcar)",
+                                            disabled=not _confirmar_borrado,
+                                        ):
+                                            with bloqueo_csv(CSV_ASISTENCIA):
+                                                df_asist_borrar = (
+                                                    pd.read_csv(CSV_ASISTENCIA)
+                                                    if os.path.exists(
+                                                        CSV_ASISTENCIA
+                                                    )
+                                                    else pd.DataFrame()
+                                                )
+                                                _mask_borrar = (
+                                                    (
+                                                        df_asist_borrar[
+                                                            "empresa_id"
+                                                        ].astype(str)
+                                                        == str(
+                                                            st.session_state.empresa_id
+                                                        )
+                                                    )
+                                                    & (
+                                                        df_asist_borrar[
+                                                            "Empleado"
+                                                        ]
+                                                        == emp_ind_sel
+                                                    )
+                                                    & (
+                                                        df_asist_borrar[
+                                                            "Fecha"
+                                                        ]
+                                                        == f_edit_sel
+                                                    )
+                                                    & (
+                                                        df_asist_borrar[
+                                                            "Tipo Marcación"
+                                                        ]
+                                                        == tipo_a_editar
+                                                    )
+                                                )
+                                                df_asist_borrar = (
+                                                    df_asist_borrar[
+                                                        ~_mask_borrar
+                                                    ]
+                                                )
+                                                df_asist_borrar.to_csv(
+                                                    CSV_ASISTENCIA,
+                                                    index=False,
+                                                )
+                                            st.success(
+                                                f"Marcación de"
+                                                f" {tipo_a_editar} del"
+                                                f" {f_edit_sel} borrada."
+                                                f" {emp_ind_sel} ya puede"
+                                                " volver a marcarla desde"
+                                                " la app."
+                                            )
+                                            st.rerun()
                                 else:
                                     st.caption(
                                         "🔒 No hay registros disponibles"
@@ -8296,6 +8423,81 @@ elif opcion == "🔐 Panel de Gestión / Admin":
                         f" **{total_tardanza}** con tardanza"
                         f"{_resumen_extra}"
                     )
+
+                    # --- Etiquetas creativas: horas acumuladas de ESTA
+                    # semana (semana calendario real, lunes a hoy —
+                    # independiente del mes que se esté viendo en el
+                    # filtro) y del MES seleccionado en el filtro de
+                    # arriba. Son individuales por trabajador, ya que
+                    # se calculan sobre df_asist_emp (ya filtrado a
+                    # emp_ind_sel). ---
+                    _hoy_ref_semana = hoy_peru()
+                    _inicio_semana_ref = _hoy_ref_semana - timedelta(
+                        days=_hoy_ref_semana.weekday()
+                    )
+                    _df_asist_emp_full = df_asistencia[
+                        df_asistencia["Empleado"] == emp_ind_sel
+                    ]
+                    _fechas_emp_full = (
+                        _df_asist_emp_full["Fecha"].astype(str).str.slice(0, 10)
+                    )
+                    _df_semana_actual = _df_asist_emp_full[
+                        (_fechas_emp_full >= _inicio_semana_ref.strftime("%Y-%m-%d"))
+                        & (_fechas_emp_full <= _hoy_ref_semana.strftime("%Y-%m-%d"))
+                    ]
+                    _h_semana, _m_semana = calcular_horas_trabajadas_periodo(
+                        _df_semana_actual
+                    )
+                    _h_mes, _m_mes = calcular_horas_trabajadas_periodo(
+                        df_asist_emp
+                    )
+
+                    render_html(f"""
+                    <div style="display:flex; gap:10px; flex-wrap:wrap;
+                        margin:10px 0 16px 0;">
+                        <div style="flex:1; min-width:190px;
+                            background:linear-gradient(135deg,#1f6feb,#5865f2);
+                            border-radius:14px; padding:14px 16px;
+                            box-shadow:0 4px 14px rgba(88,101,242,0.35);">
+                            <div style="font-size:11px; font-weight:700;
+                                letter-spacing:0.5px; color:#dbe4ff;
+                                text-transform:uppercase;">
+                                📆 Horas esta semana
+                            </div>
+                            <div style="font-size:26px; font-weight:800;
+                                color:#ffffff; margin-top:2px;">
+                                {_h_semana}<span style="font-size:15px;
+                                font-weight:600;">h</span> {_m_semana:02d}<span
+                                style="font-size:15px; font-weight:600;">min</span>
+                            </div>
+                            <div style="font-size:10.5px; color:#c9d4ff;
+                                margin-top:2px;">
+                                Lunes {_inicio_semana_ref.strftime('%d/%m')} →
+                                hoy {_hoy_ref_semana.strftime('%d/%m')}
+                            </div>
+                        </div>
+                        <div style="flex:1; min-width:190px;
+                            background:linear-gradient(135deg,#0e9f6e,#0694a2);
+                            border-radius:14px; padding:14px 16px;
+                            box-shadow:0 4px 14px rgba(14,159,110,0.35);">
+                            <div style="font-size:11px; font-weight:700;
+                                letter-spacing:0.5px; color:#d4f7ec;
+                                text-transform:uppercase;">
+                                🗓️ Horas en {mes_ind_sel.lower()}
+                            </div>
+                            <div style="font-size:26px; font-weight:800;
+                                color:#ffffff; margin-top:2px;">
+                                {_h_mes}<span style="font-size:15px;
+                                font-weight:600;">h</span> {_m_mes:02d}<span
+                                style="font-size:15px; font-weight:600;">min</span>
+                            </div>
+                            <div style="font-size:10.5px; color:#d4f7ec;
+                                margin-top:2px;">
+                                Acumulado de {mes_ind_sel} {anio_ind_sel}
+                            </div>
+                        </div>
+                    </div>
+                    """)
 
                     # --- Construcción del calendario, celda por celda ---
                     _primer_dia_mes = date(anio_ind_sel, m_num, 1)
