@@ -5422,17 +5422,27 @@ def evaluar_cumplimiento_semanas_mes(
 ):
     """Para cada semana calendario (Lunes-Domingo) que toca el mes
     seleccionado, calcula si el trabajador cumplió o no su meta de
-    horas pactadas de ESA semana completa. Devuelve una lista de dicts
-    con: numero (1,2,3...), fecha_inicio, fecha_fin, estado
+    horas pactadas de esa semana. Devuelve una lista de dicts con:
+    numero (1,2,3...), fecha_inicio, fecha_fin (la porción de esa
+    semana que cae DENTRO de este mes), estado
     ('cumplida' | 'no_cumplida' | 'en_curso' | 'futura'),
-    horas_reales (h,m), horas_meta (h,m), pct.
+    horas_reales (h,m), horas_meta (h,m), pct, es_parcial.
 
-    - 'cumplida' / 'no_cumplida': la semana ya terminó (Domingo ya
-      pasó) -> se compara el total real de esa semana completa contra
-      su meta completa.
+    - 'cumplida' / 'no_cumplida': la semana (la parte de ella que cae
+      en este mes) ya terminó -> se compara el total real contra la
+      meta de esos mismos días.
     - 'en_curso': la semana que contiene 'hoy' -> todavía no se puede
       decir si la cumplió o no, se muestra su avance parcial.
     - 'futura': semana que todavía no empieza.
+
+    IMPORTANTE: cuando la primera o la última semana del mes cae a
+    caballo con el mes anterior/siguiente (ej. el mes empieza un
+    martes, o termina un miércoles), tanto la meta como las horas
+    reales se recortan a SOLO los días de esa semana que están DENTRO
+    de este mes — así una semana que se cumplió completa (Lunes a
+    Miércoles, si el mes cerró ahí) sale con el check verde, en vez de
+    comparar contra la semana Lunes-Domingo completa cuando el mes ya
+    no tiene esos días.
     """
     _primer_dia_mes = date(anio_sel, mes_num_sel, 1)
     _ultimo_dia_mes = date(
@@ -5452,9 +5462,18 @@ def evaluar_cumplimiento_semanas_mes(
 
     resultados = []
     _num_semana = 1
-    _inicio_sem = _inicio_1ra_semana
-    while _inicio_sem <= _ultimo_dia_mes:
-        _fin_sem = _inicio_sem + timedelta(days=6)
+    _inicio_sem_calendario = _inicio_1ra_semana
+    while _inicio_sem_calendario <= _ultimo_dia_mes:
+        _fin_sem_calendario = _inicio_sem_calendario + timedelta(days=6)
+
+        # Se recorta la semana a la porción que cae DENTRO de este
+        # mes — esto es lo que se muestra y lo que se evalúa.
+        _inicio_sem = max(_inicio_sem_calendario, _primer_dia_mes)
+        _fin_sem = min(_fin_sem_calendario, _ultimo_dia_mes)
+        _es_parcial = (
+            _inicio_sem_calendario < _primer_dia_mes
+            or _fin_sem_calendario > _ultimo_dia_mes
+        )
 
         if _fin_sem < _hoy:
             _estado = "cumplida"  # se corrige abajo si no llegó a la meta
@@ -5472,9 +5491,10 @@ def evaluar_cumplimiento_semanas_mes(
                 "horas_reales": (0, 0),
                 "horas_meta": (0, 0),
                 "pct": 0,
+                "es_parcial": _es_parcial,
             })
             _num_semana += 1
-            _inicio_sem += timedelta(days=7)
+            _inicio_sem_calendario += timedelta(days=7)
             continue
 
         _df_sem = df_asist_emp_full[
@@ -5506,9 +5526,10 @@ def evaluar_cumplimiento_semanas_mes(
             "horas_reales": (_h_real, _m_real),
             "horas_meta": (_h_meta, _m_meta),
             "pct": _pct,
+            "es_parcial": _es_parcial,
         })
         _num_semana += 1
-        _inicio_sem += timedelta(days=7)
+        _inicio_sem_calendario += timedelta(days=7)
 
     return resultados
 
@@ -8561,21 +8582,104 @@ elif opcion == "🔐 Panel de Gestión / Admin":
                                     # aplicaba lo mismo a ambas de
                                     # golpe, lo cual era un error si
                                     # tenían Estado/minutos distintos).
+                                    #
+                                    # FIX: antes solo se ofrecían los
+                                    # tipos que YA tenían registro ese
+                                    # día — si se borraba la Salida
+                                    # (con el botón de más abajo), esa
+                                    # opción desaparecía del selector y
+                                    # era imposible volver a crearla
+                                    # manualmente. Ahora SIEMPRE se
+                                    # ofrecen ambas; si el tipo elegido
+                                    # no tiene registro todavía, se
+                                    # arma uno "en blanco" con valores
+                                    # sugeridos (la hora oficial de esa
+                                    # marcación), para completarlo a
+                                    # mano y guardarlo como nuevo.
                                     df_dia_edit = df_editables[
                                         df_editables["Fecha"] == f_edit_sel
                                     ]
-                                    tipos_disponibles_dia = list(
-                                        df_dia_edit["Tipo Marcación"].unique()
-                                    )
+                                    tipos_disponibles_dia = ["Entrada", "Salida"]
                                     tipo_a_editar = st.radio(
                                         "¿Cuál marcación de ese día?",
                                         tipos_disponibles_dia,
                                         horizontal=True,
                                     )
-                                    fila_actual_edit = df_dia_edit[
+                                    _fila_existente_edit = df_dia_edit[
                                         df_dia_edit["Tipo Marcación"]
                                         == tipo_a_editar
-                                    ].iloc[0]
+                                    ]
+                                    _existe_registro_edit = (
+                                        not _fila_existente_edit.empty
+                                    )
+                                    if _existe_registro_edit:
+                                        if len(_fila_existente_edit) > 1:
+                                            st.error(
+                                                f"⚠️ Hay"
+                                                f" {len(_fila_existente_edit)}"
+                                                f" registros duplicados de"
+                                                f" {tipo_a_editar} guardados"
+                                                f" para {f_edit_sel} (esto"
+                                                " no debería pasar). Al"
+                                                " guardar con el botón de"
+                                                " abajo se van a "
+                                                "reemplazar TODOS por uno"
+                                                " solo, limpio."
+                                            )
+                                        fila_actual_edit = (
+                                            _fila_existente_edit.iloc[0]
+                                        )
+                                    else:
+                                        st.warning(
+                                            f"⚠️ No existe un registro de"
+                                            f" {tipo_a_editar} para"
+                                            f" {f_edit_sel} — probablemente"
+                                            " se borró o nunca se marcó."
+                                            " Completa los datos de abajo"
+                                            " y guarda para CREARLO."
+                                        )
+                                        try:
+                                            _f_edit_date = datetime.strptime(
+                                                f_edit_sel, "%Y-%m-%d"
+                                            ).date()
+                                            _h_ofic_ent_e, _h_ofic_sal_e = (
+                                                obtener_horario_oficial(
+                                                    emp_info,
+                                                    df_sedes,
+                                                    _f_edit_date,
+                                                )
+                                            )
+                                        except Exception:
+                                            _h_ofic_ent_e, _h_ofic_sal_e = (
+                                                "08:00:00",
+                                                "17:00:00",
+                                            )
+                                        _hora_sugerida_e = (
+                                            _h_ofic_ent_e
+                                            if tipo_a_editar == "Entrada"
+                                            else _h_ofic_sal_e
+                                        )
+                                        _sede_sugerida_default = str(
+                                            emp_info.get(
+                                                "sede_principal", ""
+                                            )
+                                            if hasattr(emp_info, "get")
+                                            else ""
+                                        )
+                                        fila_actual_edit = pd.Series({
+                                            "Hora Registrada": _hora_sugerida_e,
+                                            "Hora Entrada Oficial": _h_ofic_ent_e,
+                                            "Hora Salida Oficial": _h_ofic_sal_e,
+                                            "Estado": "Puntual",
+                                            "Minutos Tardanza": 0,
+                                            "Horas Extra (min)": 0,
+                                            "Sede Detectada": (
+                                                _sede_sugerida_default
+                                            ),
+                                            "Distancia (m)": 0,
+                                            "En Rango": "SÍ",
+                                            "Foto": "",
+                                        })
 
                                     if st.session_state.developer_global:
                                         st.caption(
@@ -8647,9 +8751,11 @@ elif opcion == "🔐 Panel de Gestión / Admin":
                                                 if os.path.exists(
                                                     CSV_ASISTENCIA
                                                 )
-                                                else pd.DataFrame()
+                                                else pd.DataFrame(
+                                                    columns=COLUMNAS_ASISTENCIA
+                                                )
                                             )
-                                            indices = df_asist_fresco[
+                                            _mask_reemplazar = (
                                                 (
                                                     df_asist_fresco[
                                                         "empresa_id"
@@ -8670,35 +8776,121 @@ elif opcion == "🔐 Panel de Gestión / Admin":
                                                     df_asist_fresco["Tipo Marcación"]
                                                     == tipo_a_editar
                                                 )
-                                            ].index
+                                            )
 
-                                            for idx_mod in indices:
-                                                df_asist_fresco.at[
-                                                    idx_mod, "Estado"
-                                                ] = nuevo_est
-                                                df_asist_fresco.at[
-                                                    idx_mod,
-                                                    "Minutos Tardanza",
-                                                ] = nuevos_min_t
-                                                df_asist_fresco.at[
-                                                    idx_mod,
-                                                    "Horas Extra (min)",
-                                                ] = nuevos_min_e
-                                                if nueva_hora_registrada is not None:
-                                                    df_asist_fresco.at[
-                                                        idx_mod,
+                                            # FIX: antes se intentaba
+                                            # "actualizar si existe, crear
+                                            # si no" — pero si por
+                                            # cualquier motivo ya había
+                                            # MÁS DE UN registro guardado
+                                            # de este tipo ese día (un
+                                            # duplicado), solo se
+                                            # actualizaba uno y el resto
+                                            # quedaba huérfano dando
+                                            # justo el problema
+                                            # reportado: el calendario
+                                            # (que muestra 1 solo estado
+                                            # por día) se veía bien, pero
+                                            # la Bitácora (que lista CADA
+                                            # fila tal cual) mostraba los
+                                            # duplicados viejos. Ahora se
+                                            # borran TODOS los que
+                                            # coincidan y se inserta
+                                            # exactamente UNO limpio —
+                                            # así es imposible que vuelva
+                                            # a quedar un duplicado,
+                                            # incluso si ya había alguno
+                                            # de antes.
+                                            df_asist_fresco = df_asist_fresco[
+                                                ~_mask_reemplazar
+                                            ]
+
+                                            _hora_final_nueva = (
+                                                nueva_hora_registrada.strftime(
+                                                    "%H:%M:%S"
+                                                )
+                                                if nueva_hora_registrada
+                                                is not None
+                                                else str(
+                                                    fila_actual_edit.get(
                                                         "Hora Registrada",
-                                                    ] = nueva_hora_registrada.strftime(
-                                                        "%H:%M:%S"
+                                                        "08:00:00",
                                                     )
+                                                )
+                                            )
+                                            _sede_preservada = str(
+                                                fila_actual_edit.get(
+                                                    "Sede Detectada", ""
+                                                )
+                                                or ""
+                                            )
+                                            _nueva_fila = {
+                                                "empresa_id": (
+                                                    st.session_state.empresa_id
+                                                ),
+                                                "Fecha": f_edit_sel,
+                                                "Empleado": emp_ind_sel,
+                                                "Tipo Marcación": (
+                                                    tipo_a_editar
+                                                ),
+                                                "Hora Registrada": (
+                                                    _hora_final_nueva
+                                                ),
+                                                "Hora Entrada Oficial": (
+                                                    fila_actual_edit.get(
+                                                        "Hora Entrada"
+                                                        " Oficial", ""
+                                                    )
+                                                ),
+                                                "Hora Salida Oficial": (
+                                                    fila_actual_edit.get(
+                                                        "Hora Salida"
+                                                        " Oficial", ""
+                                                    )
+                                                ),
+                                                "Estado": nuevo_est,
+                                                "Minutos Tardanza": (
+                                                    nuevos_min_t
+                                                ),
+                                                "Horas Extra (min)": (
+                                                    nuevos_min_e
+                                                ),
+                                                "Sede Detectada": (
+                                                    _sede_preservada
+                                                ),
+                                                "Distancia (m)": (
+                                                    fila_actual_edit.get(
+                                                        "Distancia (m)", 0
+                                                    )
+                                                ),
+                                                "En Rango": (
+                                                    fila_actual_edit.get(
+                                                        "En Rango", "SÍ"
+                                                    )
+                                                ),
+                                                "Foto": (
+                                                    fila_actual_edit.get(
+                                                        "Foto", ""
+                                                    )
+                                                ),
+                                            }
+                                            df_asist_fresco = pd.concat(
+                                                [
+                                                    df_asist_fresco,
+                                                    pd.DataFrame(
+                                                        [_nueva_fila]
+                                                    ),
+                                                ],
+                                                ignore_index=True,
+                                            )
 
                                             df_asist_fresco.to_csv(
                                                 CSV_ASISTENCIA, index=False
                                             )
                                         st.success(
                                             f"Registro de {tipo_a_editar} del"
-                                            f" día {f_edit_sel} actualizado"
-                                            " con éxito."
+                                            f" día {f_edit_sel} guardado"
+                                            " (limpio, sin duplicados)."
                                         )
                                         st.rerun()
 
@@ -9140,6 +9332,11 @@ elif opcion == "🔐 Panel de Gestión / Admin":
                         ]
                         _hr, _mr = _sem["horas_reales"]
                         _he, _me = _sem["horas_meta"]
+                        _sufijo_parcial = (
+                            " (parcial, recortada al mes)"
+                            if _sem.get("es_parcial")
+                            else ""
+                        )
                         if _sem["estado"] == "futura":
                             _texto_tooltip = (
                                 f"Semana {_sem['numero']}"
@@ -9151,7 +9348,8 @@ elif opcion == "🔐 Panel de Gestión / Admin":
                             _texto_tooltip = (
                                 f"Semana {_sem['numero']}"
                                 f" ({_sem['fecha_inicio'].strftime('%d/%m')}-"
-                                f"{_sem['fecha_fin'].strftime('%d/%m')}):"
+                                f"{_sem['fecha_fin'].strftime('%d/%m')})"
+                                f"{_sufijo_parcial}:"
                                 f" {_hr}h{_mr:02d} / {_he}h{_me:02d}"
                                 f" ({_sem['pct']}%)"
                             )
@@ -9222,8 +9420,18 @@ elif opcion == "🔐 Panel de Gestión / Admin":
                         if not ent_reg.empty:
                             est_dia = ent_reg.iloc[0]["Estado"]
                             _hora_ent_cal = str(ent_reg.iloc[0].get("Hora Registrada", ""))
-                            color_borde = "#00B050" if est_dia == "Puntual" else "#FF8C00"
-                            etiqueta_dia = est_dia.upper()
+                            if sal_reg.empty and f_eval < hoy_peru():
+                                # FIX: hay Entrada pero NO hay Salida
+                                # (ej. se borró para regularizar) y el
+                                # día ya pasó — no es un turno normal
+                                # abierto (eso solo aplica a HOY), así
+                                # que se marca como incompleto en vez
+                                # de mostrar "PUNTUAL" engañosamente.
+                                color_borde = "#FFAB40"
+                                etiqueta_dia = "SIN SALIDA"
+                            else:
+                                color_borde = "#00B050" if est_dia == "Puntual" else "#FF8C00"
+                                etiqueta_dia = est_dia.upper()
                         elif f_eval > hoy_peru():
                             color_borde = "#2d3340"
                             etiqueta_dia = ""
@@ -9291,7 +9499,8 @@ elif opcion == "🔐 Panel de Gestión / Admin":
                     """)
 
                     st.caption(
-                        "🟢 Puntual · 🟠 Tardanza · 🔴 Falta · 🔵 Feriado ·"
+                        "🟢 Puntual · 🟠 Tardanza · 🟡 Sin Salida"
+                        " (incompleto) · 🔴 Falta · 🔵 Feriado ·"
                         " ⚪ Descanso (no laborable) · ⬛ Todavía no llega ese día"
                     )
 
