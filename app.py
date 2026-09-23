@@ -9347,20 +9347,24 @@ elif opcion == "🔐 Panel de Gestión / Admin":
                                         # Supabase para que no vuelva.
                                         if supabase:
                                             try:
-                                                supabase.table(
-                                                    "marcaciones_efimeras"
-                                                ).delete().eq(
-                                                    "empresa_id",
-                                                    str(
-                                                        st.session_state.empresa_id
-                                                    ),
-                                                ).eq(
-                                                    "nombre", emp_ind_sel
-                                                ).eq(
-                                                    "fecha", f_edit_sel
-                                                ).eq(
-                                                    "tipo", tipo_a_editar
-                                                ).execute()
+                                                with st.spinner(
+                                                    "Sincronizando con la"
+                                                    " nube..."
+                                                ):
+                                                    supabase.table(
+                                                        "marcaciones_efimeras"
+                                                    ).delete().eq(
+                                                        "empresa_id",
+                                                        str(
+                                                            st.session_state.empresa_id
+                                                        ),
+                                                    ).eq(
+                                                        "nombre", emp_ind_sel
+                                                    ).eq(
+                                                        "fecha", f_edit_sel
+                                                    ).eq(
+                                                        "tipo", tipo_a_editar
+                                                    ).execute()
                                             except Exception as _e_sup_del:
                                                 st.warning(
                                                     "Se guardó local, pero no"
@@ -9482,20 +9486,24 @@ elif opcion == "🔐 Panel de Gestión / Admin":
                                             # lo que se acaba de borrar.
                                             if supabase:
                                                 try:
-                                                    supabase.table(
-                                                        "marcaciones_efimeras"
-                                                    ).delete().eq(
-                                                        "empresa_id",
-                                                        str(
-                                                            st.session_state.empresa_id
-                                                        ),
-                                                    ).eq(
-                                                        "nombre", emp_ind_sel
-                                                    ).eq(
-                                                        "fecha", f_edit_sel
-                                                    ).eq(
-                                                        "tipo", tipo_a_editar
-                                                    ).execute()
+                                                    with st.spinner(
+                                                        "Sincronizando con"
+                                                        " la nube..."
+                                                    ):
+                                                        supabase.table(
+                                                            "marcaciones_efimeras"
+                                                        ).delete().eq(
+                                                            "empresa_id",
+                                                            str(
+                                                                st.session_state.empresa_id
+                                                            ),
+                                                        ).eq(
+                                                            "nombre", emp_ind_sel
+                                                        ).eq(
+                                                            "fecha", f_edit_sel
+                                                        ).eq(
+                                                            "tipo", tipo_a_editar
+                                                        ).execute()
                                                 except Exception as _e_sup_del2:
                                                     st.warning(
                                                         "Se borró local, pero"
